@@ -27,8 +27,10 @@
 /*          Test Cases                                                                          */
 /* ============================================================================================ */
 use http::response::Response;
+use http::header::HeaderValue;
 use http::status::StatusCode;
-use http::{HttpTryFrom};
+
+const WILDCARD : &str = "{}";
 
 /* ============================================================================================ */
 /*     Filter Trait                                                                             */
@@ -57,7 +59,7 @@ pub trait Filter<'a, R> {
     /// let filter = response.filter().filter_header("key", "{}");
     /// assert!(filter.is_some());
     /// ```
-    fn filter_header(self, key : &str, value : &str) -> Self;
+    fn filter_header<T>(self, key : &str, value : T) -> Self where T : PartialEq<HeaderValue> + PartialEq<&'static str>;
     /// filter_custom allows for a custom function filter. The filter will be given a &Response and
     /// will output a bool. if the bool is true, then function returns Some, if it is false then the
     /// function will return None
@@ -110,24 +112,24 @@ impl<'a, R> Filter<'a, R> for Option<&Response<R>>{
     // of self is Some. Then it checks the key, if the key is a wild card then the values
     // will need to be iterated through to check to see if they match, if the key is not
     // a wild card then we can call the get function on the Responses HeaderMap for the key.
-    fn filter_header(self, key : &str, value : &str) -> Self {
+    fn filter_header<T>(self, key : &str, value : T) -> Self where T : PartialEq<HeaderValue> + PartialEq<&'static str> {
         // since the filter functions can return none, we can't perform any work (and shouldn't)
         // if a previous filter invalidated the Response
         if let Some(response) = self {
             // Check to see if the key is the wildcard token of '{}'
-            if key == "{}" {
+            if key == WILDCARD {
                 // retrieve the headers map
                 let map = response.headers();
                 // If the value is {} and there are entries in the header map
                 // the return Some response as any value would match
-                if value == "{}" && map.len() > 0 {
+                if value == WILDCARD && map.len() > 0 {
                     return Some(response);
                 }
                 // Iterate through the different values to see if any values
                 // match the inputed value
                 for v in map.values() {
                     // if the values match return Some
-                    if v == value {
+                    if value == *v {
                         return Some(response);
                     }
                 }
@@ -135,7 +137,7 @@ impl<'a, R> Filter<'a, R> for Option<&Response<R>>{
                 // Get the key and check if it's value is equal to the inputed value
                 // otherwise fall through to the end and return None
                 match response.headers().get(key) {
-                    Some(v) if v == value || value == "{}" => return Some(response),
+                    Some(v) if value == *v || value == WILDCARD => return Some(response),
                     _ => (),
                 }
             }
@@ -174,12 +176,18 @@ impl<'a, R> Filter<'a, R> for Option<&Response<R>>{
 fn test_header() {
     use http::response::Builder;
     use crate::response::Extension;
-    let response = Builder::new().header("key", "value").body(()).unwrap();
+    use http::header::HeaderValue;
+    let mut header = HeaderValue::from_str("value").unwrap();
+    header.set_sensitive(true);
+    let response = Builder::new().header("key", header).body(()).unwrap();
     let filter = response.filter().filter_header("key", "value");
     assert!(filter.is_some());
     let filter = response.filter().filter_header("key", "{}");
     assert!(filter.is_some());
     let filter = response.filter().filter_header("{}", "value");
+    assert!(filter.is_some());
+    let header = HeaderValue::from_str("value").unwrap();
+    let filter = response.filter().filter_header("{}", header);
     assert!(filter.is_some());
     let filter = response.filter().filter_header("{}", "{}");
     assert!(filter.is_some());

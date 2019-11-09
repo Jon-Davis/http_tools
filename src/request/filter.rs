@@ -27,6 +27,8 @@
 /*          Test Cases                                                                          */
 /* ============================================================================================ */
 use http::request::Request;
+use http::header::HeaderValue;
+use http::method::Method;
 use crate::request::query_iter;
 
 /* ============================================================================================ */
@@ -163,7 +165,7 @@ pub trait Filter<'a, R> {
     /// let filter = request.filter().filter_header("key", "{}");
     /// assert!(filter.is_some());
     /// ```
-    fn filter_header(self, key : &str, value : &str) -> Self;
+    fn filter_header<T>(self, key : &str, value : T) -> Self where T : PartialEq<HeaderValue> + PartialEq<&'static str>;
     /// Checks to see if the requests path matches the specified pattern. The wildcard '{}'
     /// pattern can be used can be used to match any text between foward slashes
     /// so '/{}' will match '/any' but not '/any/more'
@@ -234,7 +236,7 @@ pub trait Filter<'a, R> {
     /// let filter = request.filter().filter_method("POST");
     /// assert!(filter.is_none());
     /// ```
-    fn filter_method(self, method : &str) -> Self;
+    fn filter_method<T>(self, method : T) -> Self where T : PartialEq<Method>;
     /// Checks to see if the uri contains a query with the given key and value. The wildcard '{}'
     /// pattern can be used to match any key or value.
     /// # Example
@@ -339,7 +341,7 @@ impl<'a, R> Filter<'a, R> for Option<&Request<R>>{
     // of self is Some. Then it checks the key, if the key is a wild card then the values
     // will need to be iterated through to check to see if they match, if the key is not
     // a wild card then we can call the get function on the Requests HeaderMap for the key.
-    fn filter_header(self, key : &str, value : &str) -> Self {
+    fn filter_header<T>(self, key : &str, value : T) -> Self where T : PartialEq<HeaderValue> + PartialEq<&'static str> {
         // since the filter functions can return none, we can't perform any work (and shouldn't)
         // if a previous filter invalidated the Request
         if let Some(request) = self {
@@ -356,7 +358,7 @@ impl<'a, R> Filter<'a, R> for Option<&Request<R>>{
                 // match the inputed value
                 for v in map.values() {
                     // if the values match return Some
-                    if v == value {
+                    if value == *v {
                         return Some(request);
                     }
                 }
@@ -364,7 +366,7 @@ impl<'a, R> Filter<'a, R> for Option<&Request<R>>{
                 // Get the key and check if it's value is equal to the inputed value
                 // otherwise fall through to the end and return None
                 match request.headers().get(key) {
-                    Some(v) if v == value || value == "{}" => return Some(request),
+                    Some(v) if value == *v || value == "{}" => return Some(request),
                     _ => (),
                 }
             }
@@ -462,12 +464,12 @@ impl<'a, R> Filter<'a, R> for Option<&Request<R>>{
     }
     // The filter_method function for Option<&Request> first checks to see that the value of
     // self is Some, then checks to see if the request method is equal to the inputed method.
-    fn filter_method(self, method : &str) -> Self {
+    fn filter_method<T>(self, method : T) -> Self where T : PartialEq<Method> {
         // since the filter functions can return none, we can't perform any work (and shouldn't)
         // if a previous filter invalidated the Request
         if let Some(request) = self {
             // check to see if the request method equals the method argument
-            if request.method() == method {
+            if method == *request.method() {
                 return self;
             }
         }
@@ -624,9 +626,12 @@ fn test_query() {
 #[test]
 fn test_method() {
     use http::request::Builder;
+    use http::method::Method;
     use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/").method("POST").body(()).unwrap();
     let filter = request.filter().filter_method("POST");
+    assert!(filter.is_some());
+    let filter = request.filter().filter_method(Method::POST);
     assert!(filter.is_some());
     let filter = request.filter().filter_method("GET");
     assert!(filter.is_none());
