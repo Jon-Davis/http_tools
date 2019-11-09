@@ -74,6 +74,65 @@ use crate::request::query_iter;
 ///     // filters simply return std Option where Some means pass and None means failed
 ///     .and_then(|_request| Some("I passed the test!"));
 ///  ```
+/// 
+/// Since all filters simply take a refrence to a Request and return an Option, the filters can be applied
+/// in a number of different ways. For example the below router ensures that the Request is authenticated before
+/// routing it.
+/// ```
+/// # use http::request::{Request, Builder};
+/// use http_tools::request::Filter;
+/// # let request = Builder::new()
+/// #                .uri("https://www.rust-lang.org/item/rust?cool=rust&also+cool=go")
+/// #                .body(()).unwrap();
+/// # fn some_handler<R>(req : &Request<R>) -> Option<()> {None};
+/// # fn some_other_handler<R>(req : &Request<R>) -> Option<()>{None};
+/// 
+/// // The following filter must pass for any of the other handlers to pass
+/// let parent_filter = request
+///     .filter_header("Authorization", "type token");
+/// 
+/// // check to see if the request is equal, if so call the handler function
+/// parent_filter
+///     .filter_path("/")
+///     .and_then(|req| some_handler(req));
+/// 
+/// // if the above function didn't match we check the next one and if this one
+/// // matches then we call some other handler function
+/// parent_filter
+///     .filter_path("/{}")
+///     .and_then(|req| some_other_handler(req));
+/// ```
+/// 
+/// If you only ever want 1 handler function to be applied, then it is more efficent to test
+/// each filter afterwards, and return the output
+/// ```
+/// # use http::{Request, Response, StatusCode};
+/// use http_tools::request::Filter;
+/// # let request = Request::builder()
+/// #                .uri("https://www.rust-lang.org/item/rust?cool=rust&also+cool=go")
+/// #                .body(()).unwrap();
+/// # fn some_handler<R>(req : &Request<R>) -> Response<()> { Response::builder().body(()).unwrap() };
+/// # fn some_other_handler<R>(req : &Request<R>) -> Response<()>{ Response::builder().body(()).unwrap() };
+/// 
+/// fn mux<R>(request : &Request<R>) -> Response<()> {
+///     // Check the first filter
+///     let filter = request
+///         .filter_method("GET")
+///         .filter_path("/");
+///     
+///     // check the second filter
+///     let filter = request
+///         .filter_method("GET")
+///         .filter_path("/{}");
+/// 
+/// 
+///     return Response::builder()
+///         .status(StatusCode::NOT_FOUND)
+///         .body(())
+///         .unwrap()
+/// }
+///
+/// ```
 pub trait Filter<'a, R> {
     /// Checks to see if the request has the specified key and value. The wildcard '{}'
     /// pattern can be used in either the key or the value string. The function returns
@@ -487,10 +546,11 @@ impl<'a, R> Filter<'a, R> for Option<&Request<R>>{
     fn filter_method(&'a self, method : &str) -> Option<&'a Request<R>> {
         // since the filter functions can return none, we can't perform any work (and shouldn't)
         // if a previous filter invalidated the Request
+        let out = *self;
         if let Some(request) = self {
             // check to see if the request method equals the method argument
             if request.method() == method {
-                return Some(request);
+                return out;
             }
         }
         // If the filter broke out, or self was None then return None
@@ -659,6 +719,17 @@ fn test_scheme() {
     use http::request::Builder;
     let request = Builder::new().uri("https://www.rust-lang.org/").body(()).unwrap();
     let filter = request.filter_scheme("https");
+    assert!(filter.is_some());
+    let filter = request.filter_scheme("http");
+    assert!(filter.is_none());
+}
+
+#[test]
+fn test_multiple_filters(){
+    use http::request::Builder;
+    let request = Builder::new().uri("https://www.rust-lang.org/").method("POST").body(()).unwrap();
+    let filter = request.filter_scheme("https");
+    let filter = filter.filter_method("POST");
     assert!(filter.is_some());
     let filter = request.filter_scheme("http");
     assert!(filter.is_none());
