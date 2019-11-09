@@ -35,7 +35,39 @@ const WILDCARD : &str = "{}";
 /* ============================================================================================ */
 /*     Filter Trait                                                                             */
 /* ============================================================================================ */
-
+/// The filter trait allows for the easy filtering of responses. They can be chained
+/// together to create more complex filters. 
+/// 
+/// Filters were designed to be used in making an http router, but can be used in many more ways. 
+/// The trait always outputs an Option<&Response>. If the option is Some then the underlying 
+/// filter applies to the response, if the response is None then response did not pass the filter. 
+/// The filter trait is implemented on both a Response and an Option<&Response>
+/// # Syntax
+/// ```
+/// # use http::response::Builder;
+/// # use http::status::StatusCode;
+/// use http_tools::response::{Filter, Extension};
+/// # let response = Builder::new()
+/// #                .status(200)
+/// #                .header("content-type", "application/x-www-form-urlencoded")
+/// #                .header("content-length", "0")
+/// #                .body(()).unwrap();
+/// 
+/// // given an http::response::Response
+/// response
+///     // Creates an Option<&Response>, each fiter returns Some(req) if it passes and None if it fails
+///     .filter()
+///     // The header has the key content-type with a value of application/x-www-form-urlencoded
+///     .filter_header("content-type", "application/x-www-form-urlencoded")
+///     // The {} wild card can be used to filter headers aswell
+///     .filter_header("content-length", "{}")
+///     // custom filters can be applied, and will be given the response and return a bool
+///     .filter_custom(|req| req.extensions().get::<i32>().is_some())
+///     // The status of the response can be filter on
+///     .filter_status(StatusCode::OK)
+///     // filters simply return std Option where Some means pass and None means failed
+///     .and_then(|_response| Some("I passed the test!"));
+///  ```
 pub trait Filter<'a, R> {
     /// Checks to see if the response has the specified key and value. The wildcard '{}'
     /// pattern can be used in either the key or the value string. The function returns
