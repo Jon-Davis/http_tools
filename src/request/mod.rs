@@ -26,6 +26,6 @@ mod filter;
 mod extension;
 
 pub use self::{
-    extension::{query_iter},
+    extension::{query_iter, Extension},
     filter::Filter,
 };

@@ -31,7 +31,7 @@ The crate provides tools that expand upon the Request and Response types found i
 allowing for the quick creation of an http router.
 ```
 # use http::request::Builder;
-use http_tools::request::Filter;
+use http_tools::request::{Extension, Filter};
 # let request = Builder::new()
 #                .uri("https://www.rust-lang.org/item/rust?cool=rust&also+cool=go")
 #                .extension(-1i32)
@@ -42,24 +42,26 @@ use http_tools::request::Filter;
 
 // standard Http::request::Request
 request
-     // match the path /item/{} where {} is a wild card
-     .filter_path("/item/{}")
-     // request has the method of type POST
-     .filter_method("POST")
-     // The header has the key content-type with a value of application/x-www-form-urlencoded
-     .filter_header("content-type", "application/x-www-form-urlencoded")
-     // The {} wild card can be used to filter headers aswell
-     .filter_header("content-length", "{}")
-     // The query has the key cool with the value rust
-     .filter_query("cool", "rust")
-     // the wild card {} can be used in queries, filters do not decode uri encodings
-     .filter_query("also+cool", "{}")
-     // custom filters can be applied, and will be given the request and return a bool
-     .filter_custom(|req| req.extensions().get::<i32>().is_some())
-     // The request has a scheme of https
-     .filter_scheme("https")
-     // filters simply return std Option where Some means pass and None means failed
-     .and_then(|_request| Some("I passed the test!"));
+    // Creates an Option<&Request>, each fiter returns Some(req) if it passes and None if it fails
+    .filter()
+    // match the path /item/{} where {} is a wild card
+    .filter_path("/item/{}")
+    // request has the method of type POST
+    .filter_method("POST")
+    // The header has the key content-type with a value of application/x-www-form-urlencoded
+    .filter_header("content-type", "application/x-www-form-urlencoded")
+    // The {} wild card can be used to filter headers aswell
+    .filter_header("content-length", "{}")
+    // The query has the key cool with the value rust
+    .filter_query("cool", "rust")
+    // the wild card {} can be used in queries, filters do not decode uri encodings
+    .filter_query("also+cool", "{}")
+    // custom filters can be applied, and will be given the request and return a bool
+    .filter_custom(|req| req.extensions().get::<i32>().is_some())
+    // The request has a scheme of https
+    .filter_scheme("https")
+    // filters simply return std Option where Some means pass and None means failed
+    .and_then(|_request| Some("I passed the test!"));
 ```
 # Iterators
 The crate provides some useful iterators that the orginal http crate did not have.

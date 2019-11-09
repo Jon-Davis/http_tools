@@ -23,7 +23,6 @@
 /* ============================================================================================ */
 /*     Document Structure                                                                       */
 /*          Filter Trait                                                                        */
-/*          impl Filter for Request                                                             */
 /*          impl Filter for Option<Request>                                                     */
 /*          Test Cases                                                                          */
 /* ============================================================================================ */
@@ -44,7 +43,7 @@ use crate::request::query_iter;
 /// # Syntax
 /// ```
 /// # use http::request::Builder;
-/// use http_tools::request::Filter;
+/// use http_tools::request::{Filter, Extension};
 /// # let request = Builder::new()
 /// #                .uri("https://www.rust-lang.org/item/rust?cool=rust&also+cool=go")
 /// #                .extension(-1i32)
@@ -55,6 +54,8 @@ use crate::request::query_iter;
 /// 
 /// // given an http::request::Request
 /// request
+///     // Creates an Option<&Request>, each fiter returns Some(req) if it passes and None if it fails
+///     .filter()
 ///     // match the path /item/{} where {} is a wild card
 ///     .filter_path("/item/{}")
 ///     // request has the method of type POST
@@ -80,7 +81,7 @@ use crate::request::query_iter;
 /// routing it.
 /// ```
 /// # use http::request::{Request, Builder};
-/// use http_tools::request::Filter;
+/// use http_tools::request::{Extension, Filter};
 /// # let request = Builder::new()
 /// #                .uri("https://www.rust-lang.org/item/rust?cool=rust&also+cool=go")
 /// #                .body(()).unwrap();
@@ -88,7 +89,7 @@ use crate::request::query_iter;
 /// # fn some_other_handler<R>(req : &Request<R>) -> Option<()>{None};
 /// 
 /// // The following filter must pass for any of the other handlers to pass
-/// let parent_filter = request
+/// let parent_filter = request.filter()
 ///     .filter_header("Authorization", "type token");
 /// 
 /// // check to see if the request is equal, if so call the handler function
@@ -107,7 +108,7 @@ use crate::request::query_iter;
 /// each filter afterwards, and return the output
 /// ```
 /// # use http::{Request, Response, StatusCode};
-/// use http_tools::request::Filter;
+/// use http_tools::request::{Extension, Filter};
 /// # let request = Request::builder()
 /// #                .uri("https://www.rust-lang.org/item/rust?cool=rust&also+cool=go")
 /// #                .body(()).unwrap();
@@ -116,15 +117,20 @@ use crate::request::query_iter;
 /// 
 /// fn mux<R>(request : &Request<R>) -> Response<()> {
 ///     // Check the first filter
-///     let filter = request
+///     let filter = request.filter()
 ///         .filter_method("GET")
 ///         .filter_path("/");
+///     if let Some(req) = filter {
+///         return some_handler(req);
+///     }
 ///     
 ///     // check the second filter
-///     let filter = request
+///     let filter = request.filter()
 ///         .filter_method("GET")
 ///         .filter_path("/{}");
-/// 
+///     if let Some(req) = filter {
+///         return some_other_handler(req);
+///     }
 /// 
 ///     return Response::builder()
 ///         .status(StatusCode::NOT_FOUND)
@@ -141,7 +147,7 @@ pub trait Filter<'a, R> {
     /// # Example
     /// ```
     /// use http::request::Builder;
-    /// use http_tools::request::Filter;
+    /// use http_tools::request::{Extension, Filter};
     /// 
     /// // Request Builder found in http crate
     /// let request = Builder::new()
@@ -150,21 +156,21 @@ pub trait Filter<'a, R> {
     ///                 .body(()).unwrap();
     /// 
     /// // matches when the key is key and value is value
-    /// let filter = request.filter_header("key", "value");
+    /// let filter = request.filter().filter_header("key", "value");
     /// assert!(filter.is_some());
     /// 
     /// // matches when the key exists
-    /// let filter = request.filter_header("key", "{}");
+    /// let filter = request.filter().filter_header("key", "{}");
     /// assert!(filter.is_some());
     /// ```
-    fn filter_header(&'a self, key : &str, value : &str) -> Option<&'a Request<R>>;
+    fn filter_header(self, key : &str, value : &str) -> Self;
     /// Checks to see if the requests path matches the specified pattern. The wildcard '{}'
     /// pattern can be used can be used to match any text between foward slashes
     /// so '/{}' will match '/any' but not '/any/more'
     /// # Example
     /// ```
     /// use http::request::Builder;
-    /// use http_tools::request::Filter;
+    /// use http_tools::request::{Extension, Filter};
     /// 
     /// // Request Builder found in http crate
     /// let request = Builder::new()
@@ -172,20 +178,20 @@ pub trait Filter<'a, R> {
     ///                     .body(()).unwrap();
     /// 
     /// // this will match because the paths are exact
-    /// let filter = request.filter_path("/var/static");
+    /// let filter = request.filter().filter_path("/var/static");
     /// assert!(filter.is_some());
     /// 
     /// // this will match because the wildcard '{}' will match var
-    /// let filter = request.filter_path("/{}/static");
+    /// let filter = request.filter().filter_path("/{}/static");
     /// assert!(filter.is_some());
     /// ```
-    fn filter_path(&'a self, pattern : &str) -> Option<&'a Request<R>>;
+    fn filter_path(self, pattern : &str) -> Self;
     /// Checks to see if the requests path begins with the specified pattern. The wildcard '{}'
     /// pattern can be used to match any text between foward slashes.
     /// # Example
     /// ```
     /// use http::request::Builder;
-    /// use http_tools::request::Filter;
+    /// use http_tools::request::{Extension, Filter};
     /// 
     /// // Request Builder found in http crate
     /// let request = Builder::new()
@@ -193,27 +199,27 @@ pub trait Filter<'a, R> {
     ///                     .body(()).unwrap();
     /// 
     /// // this will match any path
-    /// let filter = request.filter_path_prefix("/");
+    /// let filter = request.filter().filter_path_prefix("/");
     /// assert!(filter.is_some());
     /// 
     /// // this will match any path atleast 1 in size
-    /// let filter = request.filter_path_prefix("/{}");
+    /// let filter = request.filter().filter_path_prefix("/{}");
     /// assert!(filter.is_some());
     /// 
     /// // this will match any path that starts with var
-    /// let filter = request.filter_path_prefix("/var");
+    /// let filter = request.filter().filter_path_prefix("/var");
     /// assert!(filter.is_some());
     /// 
     /// // Note: This will NOT pass as each subpath must be complete
-    /// let filter = request.filter_path_prefix("/v"); // '/v' doesn't match '/var'
+    /// let filter = request.filter().filter_path_prefix("/v"); // '/v' doesn't match '/var'
     /// assert!(filter.is_none());
     /// ```
-    fn filter_path_prefix(&'a self, pattern : &str) -> Option<&'a Request<R>>;
+    fn filter_path_prefix(self, pattern : &str) -> Self;
     /// Checks to see if the request has the inputed method.
     /// # Example
     /// ```
     /// use http::request::Builder;
-    /// use http_tools::request::Filter;
+    /// use http_tools::request::{Extension, Filter};
     /// // Request Builder found in http crate
     /// let request = Builder::new()
     ///                     .uri("https://www.rust-lang.org/")
@@ -221,70 +227,70 @@ pub trait Filter<'a, R> {
     ///                     .body(()).unwrap();
     /// 
     /// // this will match any path
-    /// let filter = request.filter_method("GET");
+    /// let filter = request.filter().filter_method("GET");
     /// assert!(filter.is_some());
     /// 
     /// // this will not 
-    /// let filter = request.filter_method("POST");
+    /// let filter = request.filter().filter_method("POST");
     /// assert!(filter.is_none());
     /// ```
-    fn filter_method(&'a self, method : &str) -> Option<&'a Request<R>>;
+    fn filter_method(self, method : &str) -> Self;
     /// Checks to see if the uri contains a query with the given key and value. The wildcard '{}'
     /// pattern can be used to match any key or value.
     /// # Example
     /// ```
     /// use http::request::Builder;
-    /// use http_tools::request::Filter;
+    /// use http_tools::request::{Extension, Filter};
     /// // Request Builder found in http crate
     /// let request = Builder::new()
     ///                     .uri("https://www.rust-lang.org/?cool=rust&also+cool=go")
     ///                     .body(()).unwrap();
     /// 
     /// // this will match as the value of cool is equal to rust
-    /// let filter = request.filter_query("cool", "rust");
+    /// let filter = request.filter().filter_query("cool", "rust");
     /// assert!(filter.is_some());
     /// 
     /// // this will match because the key of cool exists
-    /// let filter = request.filter_query("cool", "{}");
+    /// let filter = request.filter().filter_query("cool", "{}");
     /// assert!(filter.is_some());
     /// 
     /// // this will match because go is a value in the query
-    /// let filter = request.filter_query("{}", "go");
+    /// let filter = request.filter().filter_query("{}", "go");
     /// assert!(filter.is_some());
     /// 
     /// // this will NOT match because filter_query does not decode it's arguments
-    /// let filter = request.filter_query("also cool", "go");
+    /// let filter = request.filter().filter_query("also cool", "go");
     /// assert!(filter.is_none());
     /// // this will work
-    /// let filter = request.filter_query("also+cool", "go");
+    /// let filter = request.filter().filter_query("also+cool", "go");
     /// assert!(filter.is_some());
     /// ```
-    fn filter_query(&'a self, key : &str, value : &str) -> Option<&'a Request<R>>;
+    fn filter_query(self, key : &str, value : &str) -> Self;
     /// Checks to see if the request has given scheme
     /// # Example
     /// ```
     /// use http::request::Builder;
-    /// use http_tools::request::Filter;
+    /// use http_tools::request::{Extension, Filter};
     /// // Request Builder found in http crate
     /// let request = Builder::new()
     ///                     .uri("https://www.rust-lang.org/")
     ///                     .body(()).unwrap();
     /// 
     /// // this will match
-    /// let filter = request.filter_scheme("https");
+    /// let filter = request.filter().filter_scheme("https");
     /// assert!(filter.is_some());
     /// // this will not 
-    /// let filter = request.filter_scheme("http");
+    /// let filter = request.filter().filter_scheme("http");
     /// assert!(filter.is_none());
     /// ```
-    fn filter_scheme(&'a self, scheme : &str) -> Option<&'a Request<R>>;
+    fn filter_scheme(self, scheme : &str) -> Self;
     /// filter_custom allows for a custom function filter. The filter will be given a &Request and
     /// will output a bool. if the bool is true, then function returns Some, if it is false then the
     /// function will return None
     /// # Example
     /// ```
     /// use http::request::Builder;
-    /// use http_tools::request::Filter;
+    /// use http_tools::request::{Extension, Filter};
     /// // Request Builder found in http crate
     /// let request = Builder::new()
     ///                     .extension(-1i32)
@@ -292,97 +298,10 @@ pub trait Filter<'a, R> {
     ///                     .body(()).unwrap();
     /// 
     /// // this will match as the request has an extension of type i32
-    /// let filter = request.filter_custom(|req| req.extensions().get::<i32>().is_some());
+    /// let filter = request.filter().filter_custom(|req| req.extensions().get::<i32>().is_some());
     /// assert!(filter.is_some());
     /// ```
-    fn filter_custom(&'a self, func : fn(&Request<R>) -> bool) -> Option<&'a Request<R>>;
-}
-
-/* ============================================================================================ */
-/*     impl Filter for Request                                                                  */
-/* ============================================================================================ */
-
-// The Filter trait is implemented for type Request, although much of the work is 
-// actually performed by the trait implementation for Option. The functions here simply
-// wrap the Request refrence into an Option and call the Option's version of the function
-impl<'a, R> Filter<'a, R> for Request<R>{
-    // The filter_header function for request wraps the given refrence to self into
-    // an option then calls the Option<&Request<R>> filter_header method
-    fn filter_header(&'a self, key : &str, value : &str) -> Option<&'a Request<R>>{
-        // wrap the refrence into an Option
-        let wrap = Some(self);
-        // call the Option<&self> function
-        match wrap.filter_header(key, value){
-            Some(_) => wrap,
-            _ => None
-        }
-    }
-    // The filter_path function for request wraps the given refrence to self into
-    // an option then calls the Option<&Request<R>> filter_path method
-    fn filter_path(&'a self, pattern : &str) -> Option<&'a Request<R>>{
-        // wrap the refrence into an Option
-        let wrap = Some(self);
-        // call the Option<&self> function
-        match wrap.filter_path(pattern){
-            Some(_) => wrap,
-            _ => None
-        }
-    }
-    // The filter_path_prefix function for request wraps the given refrence to self into
-    // an option then calls the Option<&Request<R>> filter_path_prefix method
-    fn filter_path_prefix(&'a self, pattern : &str) -> Option<&'a Request<R>>{
-        // wrap the refrence into an Option
-        let wrap = Some(self);
-        // call the Option<&self> function
-        match wrap.filter_path_prefix(pattern){
-            Some(_) => wrap,
-            _ => None
-        }
-    }
-    // The filter_method function for request wraps the given refrence to self into
-    // an option then calls the Option<&Request<R>> filter_method method
-    fn filter_method(&'a self, method : &str) -> Option<&'a Request<R>>{
-        // wrap the refrence into an Option
-        let wrap = Some(self);
-        // call the Option<&self> function
-        match wrap.filter_method(method){
-            Some(_) => wrap,
-            _ => None
-        }
-    }
-    // The filter_query function for request wraps the given refrence to self into
-    // an option then calls the Option<&Request<R>> filter_query method
-    fn filter_query(&'a self, key : &str, value : &str) -> Option<&'a Request<R>>{
-        // wrap the refrence into an Option
-        let wrap = Some(self);
-        // call the Option<&self> function
-        match wrap.filter_query(key, value){
-            Some(_) => wrap,
-            _ => None
-        }
-    }
-    // The filter_scheme function for request wraps the given refrence to self into
-    // an option then calls the Option<&Request<R>> filter_scheme method
-    fn filter_scheme(&'a self, scheme : &str) -> Option<&'a Request<R>> {
-        // wrap the refrence into an Option
-        let wrap = Some(self);
-        // call the Option<&self> function
-        match wrap.filter_scheme(scheme){
-            Some(_) => wrap,
-            _ => None
-        }
-    }
-    // The filter_custom function for request wraps the given refrence to self into
-    // an option then calls the Option<&Request<R>> filter_custom method
-    fn filter_custom(&'a self, func : fn(&Request<R>) -> bool) -> Option<&'a Request<R>> {
-        // wrap the refrence into an Option
-        let wrap = Some(self);
-        // call the Option<&self> function
-        match wrap.filter_custom(func){
-            Some(_) => wrap,
-            _ => None
-        }
-    }
+    fn filter_custom(self, func : fn(&Request<R>) -> bool) -> Self;
 }
 
 /* ============================================================================================ */
@@ -400,7 +319,7 @@ impl<'a, R> Filter<'a, R> for Option<&Request<R>>{
     // arguments. If the key is equal to the inputed key or equal to the wild card '{}'
     // and the value is equal to the inputed value or equal to the wild card '{}' then the
     // function will return Some and pass along it's refence, otherwise the 
-    fn filter_query(&'a self, key : &str, value : &str) -> Option<&'a Request<R>> {
+    fn filter_query(self, key : &str, value : &str) -> Self {
         // since the filter functions can return none, we can't perform any work (and shouldn't)
         // if a previous filter invalidated the Request
         if let Some(request) = self {
@@ -420,7 +339,7 @@ impl<'a, R> Filter<'a, R> for Option<&Request<R>>{
     // of self is Some. Then it checks the key, if the key is a wild card then the values
     // will need to be iterated through to check to see if they match, if the key is not
     // a wild card then we can call the get function on the Requests HeaderMap for the key.
-    fn filter_header(&'a self, key : &str, value : &str) -> Option<&'a Request<R>> {
+    fn filter_header(self, key : &str, value : &str) -> Self {
         // since the filter functions can return none, we can't perform any work (and shouldn't)
         // if a previous filter invalidated the Request
         if let Some(request) = self {
@@ -457,7 +376,7 @@ impl<'a, R> Filter<'a, R> for Option<&Request<R>>{
     // self is Some, then it checks to see if the path of the request matches the pattern.
     // if they aren't an exact match then the filter checks to see if there are any variable
     // wildcards {}.
-    fn filter_path(&'a self, pattern : &str) -> Option<&'a Request<R>> {
+    fn filter_path(self, pattern : &str) -> Self {
         // since the filter functions can return none, we can't perform any work (and shouldn't)
         // if a previous filter invalidated the Request
         if let Some(request) = self {
@@ -497,7 +416,7 @@ impl<'a, R> Filter<'a, R> for Option<&Request<R>>{
     // self is Some, then it checks to see if the path of the request matches the pattern.
     // if they aren't an exact match then the filter checks to see if there are any variable
     // wildcards {}.
-    fn filter_path_prefix(&'a self, pattern : &str) -> Option<&'a Request<R>> {
+    fn filter_path_prefix(self, pattern : &str) -> Self {
         // since the filter functions can return none, we can't perform any work (and shouldn't)
         // if a previous filter invalidated the Request
         if let Some(request) = self {
@@ -543,14 +462,13 @@ impl<'a, R> Filter<'a, R> for Option<&Request<R>>{
     }
     // The filter_method function for Option<&Request> first checks to see that the value of
     // self is Some, then checks to see if the request method is equal to the inputed method.
-    fn filter_method(&'a self, method : &str) -> Option<&'a Request<R>> {
+    fn filter_method(self, method : &str) -> Self {
         // since the filter functions can return none, we can't perform any work (and shouldn't)
         // if a previous filter invalidated the Request
-        let out = *self;
         if let Some(request) = self {
             // check to see if the request method equals the method argument
             if request.method() == method {
-                return out;
+                return self;
             }
         }
         // If the filter broke out, or self was None then return None
@@ -558,7 +476,7 @@ impl<'a, R> Filter<'a, R> for Option<&Request<R>>{
     }
     // The filter_scheme function for Option<&Request> first checks to see that the value of
     // self is Some, then checks to see if the request scheme is equal to the inputed scheme.
-    fn filter_scheme(&'a self, scheme : &str) -> Option<&'a Request<R>> {
+    fn filter_scheme(self, scheme : &str) -> Self {
         if let Some(request) = self {
             // check to see if the request scheme equals the scheme argument
             match request.uri().scheme_str() {
@@ -571,11 +489,11 @@ impl<'a, R> Filter<'a, R> for Option<&Request<R>>{
     }
     // The filter_scheme function for Option<&Request> first checks to see that the value of
     // self is Some, then checks to see if the request scheme is equal to the inputed scheme.
-    fn filter_custom(&'a self, func : fn(&Request<R>) -> bool) -> Option<&'a Request<R>> {
+    fn filter_custom(self, func : fn(&Request<R>) -> bool) -> Self {
         if let Some(request) = self {
             let result = func(request);
             if result {
-                return Some(request);
+                return self;
             }
         }
        None
@@ -585,152 +503,164 @@ impl<'a, R> Filter<'a, R> for Option<&Request<R>>{
 /* ============================================================================================ */
 /*     Test Cases                                                                               */
 /* ============================================================================================ */
-
 #[test]
 fn test_root_route() {
     use http::request::Builder;
+    use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/").body(()).unwrap();
-    let filter = request.filter_path("/");
+    let filter = request.filter().filter_path("/");
     assert!(filter.is_some());
 }
 
 #[test]
 fn test_full_route() {
     use http::request::Builder;
+    use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/this/is/a/longer/path").body(()).unwrap();
-    let filter = request.filter_path("/this/is/a/longer/path");
+    let filter = request.filter().filter_path("/this/is/a/longer/path");
     assert!(filter.is_some());
 }
 
 #[test]
 fn test_var_route() {
     use http::request::Builder;
+    use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/var/static").body(()).unwrap();
-    let filter = request.filter_path("/{}/static");
+    let filter = request.filter().filter_path("/{}/static");
     assert!(filter.is_some());
 }
 
 #[test]
 fn test_partial_route() {
     use http::request::Builder;
+    use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/this/is/different").body(()).unwrap();
-    let filter = request.filter_path("/this/is");
+    let filter = request.filter().filter_path("/this/is");
     assert!(filter.is_none());
 }
 
 #[test]
 fn test_pattern_route() {
     use http::request::Builder;
+    use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/").body(()).unwrap();
-    let filter = request.filter_path("this/is/longer");
+    let filter = request.filter().filter_path("this/is/longer");
     assert!(filter.is_none());
 }
 
 #[test]
 fn test_path_route() {
     use http::request::Builder;
+    use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/this/is/longer").body(()).unwrap();
-    let filter = request.filter_path("/");
+    let filter = request.filter().filter_path("/");
     assert!(filter.is_none());
 }
 
 #[test]
 fn test_path_prefix() {
     use http::request::Builder;
+    use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/this/is/longer").body(()).unwrap();
-    let filter = request.filter_path_prefix("/");
+    let filter = request.filter().filter_path_prefix("/");
     assert!(filter.is_some());
-    let filter = request.filter_path_prefix("/this/is");
+    let filter = request.filter().filter_path_prefix("/this/is");
     assert!(filter.is_some());
-    let filter = request.filter_path_prefix("/{}");
+    let filter = request.filter().filter_path_prefix("/{}");
     assert!(filter.is_some());
-    let filter = request.filter_path_prefix("/this/is/longer/than/the/original");
+    let filter = request.filter().filter_path_prefix("/this/is/longer/than/the/original");
     assert!(filter.is_none());
-    let filter = request.filter_path_prefix("/th");
+    let filter = request.filter().filter_path_prefix("/th");
     assert!(filter.is_none());
 }
 
 #[test]
 fn test_different_route() {
     use http::request::Builder;
+    use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/this/is/different").body(()).unwrap();
-    let filter = request.filter_path("/not/even/close");
+    let filter = request.filter().filter_path("/not/even/close");
     assert!(filter.is_none());
 }
 
 #[test]
 fn test_header() {
     use http::request::Builder;
+    use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/").header("key", "value").body(()).unwrap();
-    let filter = request.filter_header("key", "value");
+    let filter = request.filter().filter_header("key", "value");
     assert!(filter.is_some());
-    let filter = request.filter_header("key", "{}");
+    let filter = request.filter().filter_header("key", "{}");
     assert!(filter.is_some());
-    let filter = request.filter_header("{}", "value");
+    let filter = request.filter().filter_header("{}", "value");
     assert!(filter.is_some());
-    let filter = request.filter_header("{}", "{}");
+    let filter = request.filter().filter_header("{}", "{}");
     assert!(filter.is_some());
-    let filter = request.filter_header("key2", "value2");
+    let filter = request.filter().filter_header("key2", "value2");
     assert!(filter.is_none());
 }
 
 #[test]
 fn test_query() {
     use http::request::Builder;
+    use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/?one=two&three=four").body(()).unwrap();
-    let filter = request.filter_query("one", "two");
+    let filter = request.filter().filter_query("one", "two");
     assert!(filter.is_some());
-    let filter = request.filter_query("three", "four");
+    let filter = request.filter().filter_query("three", "four");
     assert!(filter.is_some());
-    let filter = request.filter_query("{}", "four");
+    let filter = request.filter().filter_query("{}", "four");
     assert!(filter.is_some());
-    let filter = request.filter_query("one", "{}");
+    let filter = request.filter().filter_query("one", "{}");
     assert!(filter.is_some());
-    let filter = request.filter_query("{}", "{}");
+    let filter = request.filter().filter_query("{}", "{}");
     assert!(filter.is_some());
-    let filter = request.filter_query("one", "three");
+    let filter = request.filter().filter_query("one", "three");
     assert!(filter.is_none());
-    let filter = request.filter_query("five", "six");
+    let filter = request.filter().filter_query("five", "six");
     assert!(filter.is_none());
 }
 
 #[test]
 fn test_method() {
     use http::request::Builder;
+    use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/").method("POST").body(()).unwrap();
-    let filter = request.filter_method("POST");
+    let filter = request.filter().filter_method("POST");
     assert!(filter.is_some());
-    let filter = request.filter_method("GET");
+    let filter = request.filter().filter_method("GET");
     assert!(filter.is_none());
 }
 
 #[test]
 fn test_custom() {
     use http::request::Builder;
+    use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/").body(()).unwrap();
-    let filter = request.filter_custom(|_| true);
+    let filter = request.filter().filter_custom(|_| true);
     assert!(filter.is_some());
-    let filter = request.filter_custom(|_| false);
+    let filter = request.filter().filter_custom(|_| false);
     assert!(filter.is_none());
 }
 
 #[test]
 fn test_scheme() {
     use http::request::Builder;
+    use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/").body(()).unwrap();
-    let filter = request.filter_scheme("https");
+    let filter = request.filter().filter_scheme("https");
     assert!(filter.is_some());
-    let filter = request.filter_scheme("http");
+    let filter = request.filter().filter_scheme("http");
     assert!(filter.is_none());
 }
 
 #[test]
 fn test_multiple_filters(){
     use http::request::Builder;
+    use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/").method("POST").body(()).unwrap();
-    let filter = request.filter_scheme("https");
-    let filter = filter.filter_method("POST");
+    let filter = request.filter().filter_scheme("https").filter_method("POST");
     assert!(filter.is_some());
-    let filter = request.filter_scheme("http");
+    let filter = request.filter().filter_scheme("http").filter_method("get");
     assert!(filter.is_none());
 }

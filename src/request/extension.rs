@@ -21,6 +21,25 @@
 // SOFTWARE.
 use http::request::Request;
 
+/// The Extension trait provides additional methods to the Http Request type
+pub trait Extension {
+    /// filter creates an object that can be filtered
+    /// on using the Filter trait. This is an Option<&Request>.
+    /// whenever this filter struct is passed through a filter function
+    /// it will return Some if the inner Request passed the filter, or
+    /// None if the inner Request failed the filter. 
+    fn filter(&self) -> Option<&Self>;
+
+}
+
+impl<R> Extension for Request<R> {
+    // Simply wrap a refrence to the request in an Option
+    fn filter(&self) -> Option<&Self> {
+        Some(self)
+    }
+
+}
+
 /// Returns an iterator over a query string
 /// 
 /// # Example
