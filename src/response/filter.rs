@@ -1,0 +1,214 @@
+// MIT License
+// 
+// Copyright (c) 2019 Jonathon Davis
+// 
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+// 
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software. 
+// 
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
+/* ============================================================================================ */
+/*     Document Structure                                                                       */
+/*          Filter Trait                                                                        */
+/*          impl Filter for Option<Response>                                                    */
+/*          Test Cases                                                                          */
+/* ============================================================================================ */
+use http::response::Response;
+use http::status::StatusCode;
+use http::{HttpTryFrom};
+
+/* ============================================================================================ */
+/*     Filter Trait                                                                             */
+/* ============================================================================================ */
+
+pub trait Filter<'a, R> {
+    /// Checks to see if the response has the specified key and value. The wildcard '{}'
+    /// pattern can be used in either the key or the value string. The function returns
+    /// Some(response) if the header with the key and value are found or None if they are
+    /// absent. 
+    /// # Example
+    /// ```
+    /// use http::response::Builder;
+    /// use http_tools::response::{Extension, Filter};
+    /// 
+    /// // Response Builder found in http crate
+    /// let response = Builder::new()
+    ///                 .header("key", "value")
+    ///                 .body(()).unwrap();
+    /// 
+    /// // matches when the key is key and value is value
+    /// let filter = response.filter().filter_header("key", "value");
+    /// assert!(filter.is_some());
+    /// 
+    /// // matches when the key exists
+    /// let filter = response.filter().filter_header("key", "{}");
+    /// assert!(filter.is_some());
+    /// ```
+    fn filter_header(self, key : &str, value : &str) -> Self;
+    /// filter_custom allows for a custom function filter. The filter will be given a &Response and
+    /// will output a bool. if the bool is true, then function returns Some, if it is false then the
+    /// function will return None
+    /// # Example
+    /// ```
+    /// use http::response::Builder;
+    /// use http_tools::response::{Extension, Filter};
+    /// // Response Builder found in http crate
+    /// let response = Builder::new()
+    ///                     .extension(-1i32)
+    ///                     .body(()).unwrap();
+    /// 
+    /// // this will match as the response has an extension of type i32
+    /// let filter = response.filter().filter_custom(|req| req.extensions().get::<i32>().is_some());
+    /// assert!(filter.is_some());
+    /// ```
+    fn filter_custom(self, func : fn(&Response<R>) -> bool) -> Self;
+    /// filter_status checks to see if the status of the Response is equal to the response status.
+    /// The filter will return Some(&Response) if the status codes are equal and None otherwise. If 
+    /// filtering over a wider variety of errors use the filter_status_success, filter_status_client_error,
+    /// filter_status_server_error, filter_status_redirection and filter_status_informational
+    /// # Example
+    /// ```
+    /// use http::response::Builder;
+    /// use http::status::StatusCode;
+    /// use http_tools::response::{Extension, Filter};
+    /// // Response Builder found in http crate
+    /// let response = Builder::new()
+    ///                     .status(200)
+    ///                     .body(()).unwrap();
+    /// 
+    /// // this will match as the response has an extension of type i32
+    /// let filter = response.filter().filter_status(StatusCode::OK);
+    /// assert!(filter.is_some());
+    /// ```
+    fn filter_status<T>(self, status : T) -> Self where StatusCode : PartialEq<T>;
+}
+
+/* ============================================================================================ */
+/*     impl Filter for Option<Response>                                                         */
+/* ============================================================================================ */
+
+// The filter trait implentation for Option<&Response> does the actuall filtering
+// It takes in an Option<&Response> and outputs an Option<&Response> in order to allow
+// for the chaining of multiple filters. If a filter function returns Some that means
+// that the response passed through the filter, if a filter function returns None that
+// means the response did not pass the filter.
+impl<'a, R> Filter<'a, R> for Option<&Response<R>>{
+    // The filter_header function for Option<&Response> first checks to see that the value
+    // of self is Some. Then it checks the key, if the key is a wild card then the values
+    // will need to be iterated through to check to see if they match, if the key is not
+    // a wild card then we can call the get function on the Responses HeaderMap for the key.
+    fn filter_header(self, key : &str, value : &str) -> Self {
+        // since the filter functions can return none, we can't perform any work (and shouldn't)
+        // if a previous filter invalidated the Response
+        if let Some(response) = self {
+            // Check to see if the key is the wildcard token of '{}'
+            if key == "{}" {
+                // retrieve the headers map
+                let map = response.headers();
+                // If the value is {} and there are entries in the header map
+                // the return Some response as any value would match
+                if value == "{}" && map.len() > 0 {
+                    return Some(response);
+                }
+                // Iterate through the different values to see if any values
+                // match the inputed value
+                for v in map.values() {
+                    // if the values match return Some
+                    if v == value {
+                        return Some(response);
+                    }
+                }
+            } else {
+                // Get the key and check if it's value is equal to the inputed value
+                // otherwise fall through to the end and return None
+                match response.headers().get(key) {
+                    Some(v) if v == value || value == "{}" => return Some(response),
+                    _ => (),
+                }
+            }
+        }
+        // If the filter broke out, or self was None then return None
+        None
+    }
+    // The filter_scheme function for Option<&Response> first checks to see that the value of
+    // self is Some, then checks to see if the response scheme is equal to the inputed scheme.
+    fn filter_custom(self, func : fn(&Response<R>) -> bool) -> Self {
+        if let Some(response) = self {
+            let result = func(response);
+            if result {
+                return self;
+            }
+        }
+       None
+    }
+    // The filter_status function for Option<&Response> checks to see if the given status
+    // is equal to the response status. The value will be Some if they are equal and None
+    // if they are not
+    fn filter_status<T>(self, status : T) -> Self where StatusCode : PartialEq<T>{
+        if let Some(response) = self {
+            if response.status() == status {
+                return self;
+            }
+        }
+        None
+    }
+}
+
+/* ============================================================================================ */
+/*     Test Cases                                                                               */
+/* ============================================================================================ */
+#[test]
+fn test_header() {
+    use http::response::Builder;
+    use crate::response::Extension;
+    let response = Builder::new().header("key", "value").body(()).unwrap();
+    let filter = response.filter().filter_header("key", "value");
+    assert!(filter.is_some());
+    let filter = response.filter().filter_header("key", "{}");
+    assert!(filter.is_some());
+    let filter = response.filter().filter_header("{}", "value");
+    assert!(filter.is_some());
+    let filter = response.filter().filter_header("{}", "{}");
+    assert!(filter.is_some());
+    let filter = response.filter().filter_header("key2", "value2");
+    assert!(filter.is_none());
+}
+
+#[test]
+fn test_custom() {
+    use http::response::Builder;
+    use crate::response::Extension;
+    let response = Builder::new().body(()).unwrap();
+    let filter = response.filter().filter_custom(|_| true);
+    assert!(filter.is_some());
+    let filter = response.filter().filter_custom(|_| false);
+    assert!(filter.is_none());
+}
+
+#[test]
+fn test_status() {
+    use http::response::Builder;
+    use crate::response::Extension;
+    let response = Builder::new().status(StatusCode::OK).body(()).unwrap();
+    let filter = response.filter().filter_status(StatusCode::OK);
+    assert!(filter.is_some());
+    let filter = response.filter().filter_status(200);
+    assert!(filter.is_some());
+    let filter = response.filter().filter_status(500);
+    assert!(filter.is_none());
+    let filter = response.filter().filter_status(1000);
+    assert!(filter.is_none());
+}

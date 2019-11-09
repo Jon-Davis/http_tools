@@ -19,54 +19,21 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
-use http::request::Request;
+use http::response::Response;
 
-/// The Extension trait provides additional methods to the Http Request type
+/// The Extension trait provides additional methods to the Http Response type
 pub trait Extension {
-    /// Creates an Option<&Request> that can be filtered
+    /// Creates an Option<&Response> that can be filtered
     /// on using the Filter trait. Whenever this filter struct is passed 
     /// through a filter function it will return Some if the inner 
-    /// Request passed the filter, or None if the inner Request failed the filter. 
+    /// Response passed the filter, or None if the inner Response failed the filter. 
     fn filter(&self) -> Option<&Self>;
 }
 
-impl<R> Extension for Request<R> {
-    // Simply wrap a refrence to the request in an Option
+impl<R> Extension for Response<R> {
+    // Simply wrap a refrence to the response in an Option
     fn filter(&self) -> Option<&Self> {
         Some(self)
     }
 
-}
-
-/// Returns an iterator over a query string
-/// 
-/// # Example
-/// ```
-/// use http::request::Builder;
-/// use http_tools::request::query_iter;
-///
-/// // given an  http request
-/// let request = Builder::new()
-///                 .uri("https://www.rust-lang.org/?one=two&three=four")
-///                 .body(()).unwrap();
-/// 
-/// // use the http_tools function to create an iterator
-/// for (key, value) in query_iter(&request){
-///     println!("{} {}", key, value)
-/// }
-/// 
-/// // will print out 
-/// // one two
-/// // three four
-/// ```
-pub fn query_iter<'a, R>(request : &'a Request<R>) -> impl 'a + Iterator<Item=(&'a str, &'a str)> {
-    request.uri().query()
-        .unwrap_or("")
-        .split("&")
-        .map(|q| {
-            let mut q = q.split('=').fuse();
-            (q.next(), q.next())
-        })
-        .filter(|(key, value)| key.is_some() && value.is_some())
-        .map(|(key, value)| (key.unwrap(), value.unwrap())) 
 }

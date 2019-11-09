@@ -34,7 +34,7 @@ request
     .and_then(|_request| Some("I passed the test!"));
 ```
 ## Iterators
-The crate provides some useful iterators that the orginal http crate did not have.
+The crate provides some useful iterators
 ```rust
 use http_tools::request::query_iter;
 
