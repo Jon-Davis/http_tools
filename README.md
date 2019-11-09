@@ -1,3 +1,5 @@
+[![Crates.io](https://img.shields.io/crates/v/http_tools.svg)](https://crates.io/crates/http_tools)
+[![Documentation](https://docs.rs/http_tools/badge.svg)](https://docs.rs/http_tools)
 # HTTP Tools
 The http_tools crate aims to provide additional functions on the types found in the 
 http crate. This crate aims to only provide functions that do not cause heap allocations and
