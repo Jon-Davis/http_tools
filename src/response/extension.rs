@@ -35,5 +35,4 @@ impl<R> Extension for Response<R> {
     fn filter(&self) -> Option<&Self> {
         Some(self)
     }
-
 }

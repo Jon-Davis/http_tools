@@ -20,11 +20,10 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 /*! 
- Provides functions and implements traits on the http::request::Request type.
+ Provides functions and implements traits on the http::request::Response type.
 */
 mod filter;
 mod extension;
-
 pub use self::{
     extension::Extension,
     filter::Filter,

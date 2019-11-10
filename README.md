@@ -35,6 +35,37 @@ request
     // filters simply return std Option where Some means pass and None means failed
     .and_then(|_request| Some("I passed the test!"));
 ```
+
+## Routing Service
+The crate provides some helpful macros to reduce the boiler plate of creating a routing service
+```rust
+#[macro_use] extern crate http_tools;
+use http_tools::request::{Extension, Filter};
+use http::request::{Request};
+use http::response::{Builder, Response};
+
+// routes the request to the proper handler and returns the response
+fn router(req : &Request<()>) -> Response<()> {
+    // Handles Post requests to root uri
+    handle_fn!(post_handler, req.filter()
+        .filter_path("/")
+        .filter_method("POST"));
+
+    // Handles Get requests to root uri
+    handle_fn!(get_handler, req.filter()
+        .filter_path("/")
+        .filter_method("GET"));
+
+    // Handles Get requests to some_service/WILDCARD 
+    handle_fn!(service_handler, req.filter()
+        .filter_path("some_service/{}")
+        .filter_method("GET"));
+
+    // Returns method not found
+    Builder::new().status(405).body(()).unwrap()
+}
+```
+
 ## Iterators
 The crate provides some useful iterators
 ```rust
