@@ -121,4 +121,6 @@ extern crate http;
 
 pub mod request;
 pub mod response;
+pub mod interface;
+pub mod encoding;
 mod macros;

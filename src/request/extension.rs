@@ -20,20 +20,21 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 use http::request::Request;
-
+use crate::request::Filter;
+use crate::encoding::PercentEncodedStr;
 /// The Extension trait provides additional methods to the Http Request type
-pub trait Extension {
+pub trait Extension<'a, R> {
     /// Creates an Option<&Request> that can be filtered
     /// on using the Filter trait. Whenever this filter struct is passed 
     /// through a filter function it will return Some if the inner 
     /// Request passed the filter, or None if the inner Request failed the filter. 
-    fn filter(&self) -> Option<&Self>;
+    fn filter(&'a self) -> Filter<'a, R>;
 }
 
-impl<R> Extension for Request<R> {
+impl<'a, R> Extension<'a, R> for Request<R> {
     // Simply wrap a refrence to the request in an Option
-    fn filter(&self) -> Option<&Self> {
-        Some(self)
+    fn filter(&'a self) -> Filter<'a, R> {
+        Filter::new(self)
     }
 
 }
@@ -59,7 +60,7 @@ impl<R> Extension for Request<R> {
 /// // one two
 /// // three four
 /// ```
-pub fn query_iter<'a, R>(request : &'a Request<R>) -> impl 'a + Iterator<Item=(&'a str, &'a str)> {
+pub fn query_iter<'a, R>(request : &'a Request<R>) -> impl 'a + Iterator<Item=(PercentEncodedStr<'a>, PercentEncodedStr<'a>)> {
     request.uri().query()
         .unwrap_or("")
         .split("&")
@@ -68,5 +69,5 @@ pub fn query_iter<'a, R>(request : &'a Request<R>) -> impl 'a + Iterator<Item=(&
             (q.next(), q.next())
         })
         .filter(|(key, value)| key.is_some() && value.is_some())
-        .map(|(key, value)| (key.unwrap(), value.unwrap())) 
+        .map(|(key, value)| (PercentEncodedStr::new(key.unwrap()), PercentEncodedStr::new(value.unwrap())))
 }

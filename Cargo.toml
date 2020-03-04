@@ -11,4 +11,4 @@ keywords = ["http", "router", "mux"]
 categories = ["web-programming"]
 
 [dependencies]
-http = "0.1"
+http = "0.2"

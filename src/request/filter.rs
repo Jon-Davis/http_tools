@@ -27,13 +27,11 @@
 /*          Test Cases                                                                          */
 /* ============================================================================================ */
 use http::request::Request;
-use http::header::HeaderValue;
 use http::method::Method;
+use http::header::HeaderValue;
+use crate::encoding::PercentEncodedStr;
 use crate::request::query_iter;
-
-/* ============================================================================================ */
-/*     Filter Trait                                                                             */
-/* ============================================================================================ */
+use crate::interface::HttpToolsContainer;
 
 /// The filter trait allows for the easy filtering of requests. They can be chained
 /// together to create more complex filters. 
@@ -141,11 +139,28 @@ use crate::request::query_iter;
 /// }
 ///
 /// ```
-pub trait Filter<'a, R> {
+pub struct Filter<'a, R> {
+    request: Option<&'a Request<R>>,
+    response : Option<&'a dyn Fn(&'a Request<R>) -> http::response::Builder>,
+}
+
+impl<'a, R> Filter<'a, R>{
+    // Constructs a new Filter given a &Request
+    pub fn new(request : &'a Request<R>) -> Filter<'a, R> {
+        Filter{
+            response: None,
+            request: Some(request),
+        }
+    }
+
+    /// Returns true if the filter has passed all of the checks, false if it has failed atleast one
+    pub fn is_fufilled(&self) -> bool {
+        self.request.is_some()
+    }
+
     /// Checks to see if the request has the specified key and value. The wildcard '{}'
-    /// pattern can be used in either the key or the value string. The function returns
-    /// Some(request) if the header with the key and value are found or None if they are
-    /// absent. 
+    /// pattern can be used to match any value, multiple values can be specified with {value1|value2},
+    /// optional keys begin with '?'.
     /// # Example
     /// ```
     /// use http::request::Builder;
@@ -157,18 +172,101 @@ pub trait Filter<'a, R> {
     ///                 .header("key", "value")
     ///                 .body(()).unwrap();
     /// 
-    /// // matches when the key is key and value is value
+    /// // matches when the key is 'key' and value is 'value'
     /// let filter = request.filter().filter_header("key", "value");
-    /// assert!(filter.is_some());
+    /// assert!(filter.is_fufilled());
+    /// 
+    /// // fails only if the key is present and the value does not match the pattern
+    /// // if the key is absent this will succeed, or if the key exists and the value pattern matches
+    /// let filter = request.filter().filter_header("?different_key", "different_value");
+    /// assert!(filter.is_fufilled()); // still matches because different_key isn't set
     /// 
     /// // matches when the key exists
     /// let filter = request.filter().filter_header("key", "{}");
-    /// assert!(filter.is_some());
+    /// assert!(filter.is_fufilled());
+    /// 
+    /// // matches when the key is one of the following
+    /// let filter = request.filter().filter_header("key", "{foo|bar|baz|value}");
+    /// assert!(filter.is_fufilled());
+    /// 
     /// ```
-    fn filter_header<T>(self, key : &str, value : T) -> Self where T : PartialEq<HeaderValue> + PartialEq<&'static str>;
+    pub fn filter_header<T : HttpToolsContainer<HeaderValue>>(mut self, key : &str, value : T) -> Self {
+        // since the filter functions can return none, we can't perform any work (and shouldn't)
+        // if a previous filter invalidated the Request
+        self.request = self.request.and_then(|request| {
+            let (key, optional) = if key.starts_with('?') { 
+                (key.get(1..).unwrap_or(""), true) 
+            } else {
+                (key, false)
+            };
+
+            match (request.headers().get(key), optional) {
+                // if the header exists and the header_value is contained in value, the filter passes
+                (Some(header_value),_) if value.http_tools_contains(header_value) => Some(request),
+                // if the header was not found and the optional flag was set, the filter passes
+                (None,true) => Some(request),
+                // otherwise the filter failes
+                _ => None
+            }
+        });
+        self
+    }
+    /// Checks to see if the uri contains a query with the given key and value. The wildcard '{}'
+    /// pattern can be used to match any value, multiple values can be specified with {value1|value2},
+    /// optional keys begin with '?'.
+    /// # Example
+    /// ```
+    /// use http::request::Builder;
+    /// use http_tools::request::{Extension, Filter};
+    /// // Request Builder found in http crate
+    /// let request = Builder::new()
+    ///                     .uri("https://www.rust-lang.org/?one%2Bone=two") // <-- query is decoded
+    ///                     .body(()).unwrap();
+    /// 
+    /// // this will match as the value of one+one is two
+    /// let filter = request.filter().filter_query("one+one", "two");
+    /// assert!(filter.is_fufilled());
+    /// 
+    /// // this will match because the key of one+one exists
+    /// let filter = request.filter().filter_query("one+one", "{}");
+    /// assert!(filter.is_fufilled());
+    /// 
+    /// // this will match because the key of one+one is one of the values
+    /// let filter = request.filter().filter_query("one+one", "{one|two|three}");
+    /// assert!(filter.is_fufilled());
+    /// 
+    /// // this will NOT match because the key does not exist
+    /// let filter = request.filter().filter_query("two+two", "four");
+    /// assert!(!filter.is_fufilled());
+    /// 
+    /// // If a query key is optional the ? can be used in the key
+    /// // which will match when the key is found and equal to the value pattern
+    /// // or if the key is not found
+    /// let filter = request.filter().filter_query("?two+two", "four");
+    /// assert!(filter.is_fufilled());
+    /// ```
+    pub fn filter_query<T : HttpToolsContainer<PercentEncodedStr<'a>>>(mut self, key : &str, value : T) -> Self {
+        // since the filter functions can return none, we can't perform any work (and shouldn't)
+        // if a previous filter invalidated the Request
+        self.request = self.request.and_then(|request| {
+            let (key, optional) = if key.starts_with('?') { 
+                (key.get(1..).unwrap_or(""), true) 
+            } else {
+                (key, false)
+            };
+            // iterate through the querys
+            query_iter(&request).filter(|(k,_)| *k == key).nth(0)
+                .map_or_else(|| Some(request).filter(|_| optional), 
+                             |(_,v)| Some(request).filter(|_| value.http_tools_contains(&v)))
+        });
+        
+        self
+    }
     /// Checks to see if the requests path matches the specified pattern. The wildcard '{}'
     /// pattern can be used can be used to match any text between foward slashes
-    /// so '/{}' will match '/any' but not '/any/more'
+    /// so '/{}' will match '/any' but not '/any/more'. For mathcing the rest of the pattern the
+    /// terminator '*' can be used so '/*' will match all paths. For a set of matches the pattern
+    /// {First|Second|Third} can be used so /{var|val}/* will match any path starting with var or val.
     /// # Example
     /// ```
     /// use http::request::Builder;
@@ -181,93 +279,91 @@ pub trait Filter<'a, R> {
     /// 
     /// // this will match because the paths are exact
     /// let filter = request.filter().filter_path("/var/static");
-    /// assert!(filter.is_some());
+    /// assert!(filter.is_fufilled());
+    /// 
+    /// // this will not match as the pattern is different
+    /// let filter = request.filter().filter_path("/something/different");
+    /// assert!(!filter.is_fufilled());
     /// 
     /// // this will match because the wildcard '{}' will match var
     /// let filter = request.filter().filter_path("/{}/static");
-    /// assert!(filter.is_some());
+    /// assert!(filter.is_fufilled());
+    /// 
+    /// // this will not match as the pattern is too short
+    /// let filter = request.filter().filter_path("/");
+    /// assert!(!filter.is_fufilled());
+    /// 
+    /// // this will match because the '*' token means match all remaining
+    /// let filter = request.filter().filter_path("/*");
+    /// assert!(filter.is_fufilled());
+    /// 
+    /// // this will match because one of the options is the correct path
+    /// let filter = request.filter().filter_path("/{var|val|temp}/static");
+    /// assert!(filter.is_fufilled());
     /// ```
-    fn filter_path(self, pattern : &str) -> Self;
-    /// Checks to see if the requests path begins with the specified pattern. The wildcard '{}'
-    /// pattern can be used to match any text between foward slashes.
-    /// # Example
-    /// ```
-    /// use http::request::Builder;
-    /// use http_tools::request::{Extension, Filter};
-    /// 
-    /// // Request Builder found in http crate
-    /// let request = Builder::new()
-    ///                     .uri("https://www.rust-lang.org/var/static")
-    ///                     .body(()).unwrap();
-    /// 
-    /// // this will match any path
-    /// let filter = request.filter().filter_path_prefix("/");
-    /// assert!(filter.is_some());
-    /// 
-    /// // this will match any path atleast 1 in size
-    /// let filter = request.filter().filter_path_prefix("/{}");
-    /// assert!(filter.is_some());
-    /// 
-    /// // this will match any path that starts with var
-    /// let filter = request.filter().filter_path_prefix("/var");
-    /// assert!(filter.is_some());
-    /// 
-    /// // Note: This will NOT pass as each subpath must be complete
-    /// let filter = request.filter().filter_path_prefix("/v"); // '/v' doesn't match '/var'
-    /// assert!(filter.is_none());
-    /// ```
-    fn filter_path_prefix(self, pattern : &str) -> Self;
+    pub fn filter_path(mut self, pattern : &str) -> Self {
+        // since the filter functions can return none, we can't perform any work (and shouldn't)
+        // if a previous filter invalidated the Request
+        self.request = self.request.and_then(|request| {
+            // get the path from the uri
+            let path = request.uri().path();
+            // check to see if the path and pattern equal eachother
+            if path == pattern { return Some(request); }
+
+            // create two iterators split on the forward slash for both
+            // the pattern given as an argument and the actual path of 
+            // the request being filtered
+            let (mut split_pattern, mut split_path) = (pattern.split('/'), path.split('/'));
+            loop {
+                // call next on each of the iterators
+                return match (split_pattern.next(), split_path.next()) {
+                    // if the pattern matches equals '*' then the rest of the path is accepted
+                    (Some(pattern), _) if pattern == "*" => Some(request),
+                    // if they both have a result check to see if the pattern is a wildcard or they equal eachother
+                    (Some(pattern), Some(path)) if !pattern.http_tools_contains(&path) => None,
+                    // if the pattern or path end before one another then they are not the same length, thus not equal
+                    (None, Some(_)) | (Some(_), None) => None,
+                    // if both the pattern and path end at the same time then they have been equal up to this point
+                    // and are assumed to be equal
+                    (None, None) => Some(request),
+                    // if both the pattern and path are equal or the pattern is {} continue with the loop
+                    _ => continue,
+                };
+            }
+        });
+        // If the filter broke out, or self was None then return None
+        self
+    }
     /// Checks to see if the request has the inputed method.
     /// # Example
     /// ```
     /// use http::request::Builder;
     /// use http_tools::request::{Extension, Filter};
+    /// use http::method::Method;
+    /// 
     /// // Request Builder found in http crate
     /// let request = Builder::new()
     ///                     .uri("https://www.rust-lang.org/")
     ///                     .method("GET")
     ///                     .body(()).unwrap();
     /// 
-    /// // this will match any path
-    /// let filter = request.filter().filter_method("GET");
-    /// assert!(filter.is_some());
+    /// // this will match the method
+    /// let filter = request.filter().filter_methods(&["GET"]);
+    /// assert!(filter.is_fufilled());
     /// 
     /// // this will not 
-    /// let filter = request.filter().filter_method("POST");
-    /// assert!(filter.is_none());
+    /// let filter = request.filter().filter_methods(&["POST"]);
+    /// assert!(filter.is_fufilled());
+    /// 
+    /// // multiple methods can be specified
+    /// let filter = request.filter().filter_methods(&[Method::DELETE, Method::PUT, Method::GET])
+    /// assert!(filter.is_fufilled());
     /// ```
-    fn filter_method<T>(self, method : T) -> Self where T : PartialEq<Method>;
-    /// Checks to see if the uri contains a query with the given key and value. The wildcard '{}'
-    /// pattern can be used to match any key or value.
-    /// # Example
-    /// ```
-    /// use http::request::Builder;
-    /// use http_tools::request::{Extension, Filter};
-    /// // Request Builder found in http crate
-    /// let request = Builder::new()
-    ///                     .uri("https://www.rust-lang.org/?cool=rust&also+cool=go")
-    ///                     .body(()).unwrap();
-    /// 
-    /// // this will match as the value of cool is equal to rust
-    /// let filter = request.filter().filter_query("cool", "rust");
-    /// assert!(filter.is_some());
-    /// 
-    /// // this will match because the key of cool exists
-    /// let filter = request.filter().filter_query("cool", "{}");
-    /// assert!(filter.is_some());
-    /// 
-    /// // this will match because go is a value in the query
-    /// let filter = request.filter().filter_query("{}", "go");
-    /// assert!(filter.is_some());
-    /// 
-    /// // this will NOT match because filter_query does not decode it's arguments
-    /// let filter = request.filter().filter_query("also cool", "go");
-    /// assert!(filter.is_none());
-    /// // this will work
-    /// let filter = request.filter().filter_query("also+cool", "go");
-    /// assert!(filter.is_some());
-    /// ```
-    fn filter_query(self, key : &str, value : &str) -> Self;
+    pub fn filter_method<T : HttpToolsContainer<Method>>(mut self, methods : T) -> Self {
+        // don't perform work if filter is already false
+        self.request = self.request.filter(|r| methods.http_tools_contains(r.method()));
+        self
+    }
     /// Checks to see if the request has given scheme
     /// # Example
     /// ```
@@ -285,7 +381,39 @@ pub trait Filter<'a, R> {
     /// let filter = request.filter().filter_scheme("http");
     /// assert!(filter.is_none());
     /// ```
-    fn filter_scheme(self, scheme : &str) -> Self;
+    pub fn filter_scheme<T : HttpToolsContainer<&'a str>>(mut self, scheme : T) -> Self {
+        // check to see if the request scheme equals the scheme argument
+        self.request = self.request.and_then(|request| {
+            request.uri().scheme_str().filter(|s | scheme.http_tools_contains(&s)).map(|_| request)
+        });
+        // If the filter broke out, or self was None then return None
+        self
+    }
+    /// Checks to see if the request has given scheme
+    /// # Example
+    /// ```
+    /// use http::request::Builder;
+    /// use http_tools::request::{Extension, Filter};
+    /// // Request Builder found in http crate
+    /// let request = Builder::new()
+    ///                     .uri("https://www.rust-lang.org/")
+    ///                     .body(()).unwrap();
+    /// 
+    /// // this will match
+    /// let filter = request.filter().filter_scheme("https");
+    /// assert!(filter.is_some());
+    /// // this will not 
+    /// let filter = request.filter().filter_scheme("http");
+    /// assert!(filter.is_none());
+    /// ```
+    pub fn filter_ports<T : HttpToolsContainer<u16>>(mut self, ports : T) -> Self {
+        // check to see if the request scheme equals the scheme argument
+        self.request = self.request.and_then(|request| {
+            request.uri().port_u16().filter(|p| ports.http_tools_contains(p)).map(|_| request)
+        });
+        // If the filter broke out, or self was None then return None
+        self
+    }
     /// filter_custom allows for a custom function filter. The filter will be given a &Request and
     /// will output a bool. if the bool is true, then function returns Some, if it is false then the
     /// function will return None
@@ -303,215 +431,23 @@ pub trait Filter<'a, R> {
     /// let filter = request.filter().filter_custom(|req| req.extensions().get::<i32>().is_some());
     /// assert!(filter.is_some());
     /// ```
-    fn filter_custom(self, func : fn(&Request<R>) -> bool) -> Self;
-}
-
-/* ============================================================================================ */
-/*     impl Filter for Option<Request>                                                          */
-/* ============================================================================================ */
-
-// The filter trait implentation for Option<&Request> does the actuall filtering
-// It takes in an Option<&Request> and outputs an Option<&Request> in order to allow
-// for the chaining of multiple filters. If a filter function returns Some that means
-// that the request passed through the filter, if a filter function returns None that
-// means the request did not pass the filter.
-impl<'a, R> Filter<'a, R> for Option<&Request<R>>{
-    // The filter_query function for Option<&Request> first checks to see that the value of
-    // self is Some, then it calls request::query_iter to retrieve an iterator over the query
-    // arguments. If the key is equal to the inputed key or equal to the wild card '{}'
-    // and the value is equal to the inputed value or equal to the wild card '{}' then the
-    // function will return Some and pass along it's refence, otherwise the 
-    fn filter_query(self, key : &str, value : &str) -> Self {
-        // since the filter functions can return none, we can't perform any work (and shouldn't)
-        // if a previous filter invalidated the Request
-        if let Some(request) = self {
-            // iterate through the querys
-            for (q_key,q_value) in query_iter(request){
-                // if the key == q_key or {} and the value == q_value or {} then the pattern
-                // matches and we can return the refrence
-                if (key == "{}" || key == q_key) && (value == "{}" || value == q_value) {
-                    return Some(request);
-                }
-            }
-        }
-        // If the filter broke out, or self was None then return None
-        None
-    }
-    // The filter_header function for Option<&Request> first checks to see that the value
-    // of self is Some. Then it checks the key, if the key is a wild card then the values
-    // will need to be iterated through to check to see if they match, if the key is not
-    // a wild card then we can call the get function on the Requests HeaderMap for the key.
-    fn filter_header<T>(self, key : &str, value : T) -> Self where T : PartialEq<HeaderValue> + PartialEq<&'static str> {
-        // since the filter functions can return none, we can't perform any work (and shouldn't)
-        // if a previous filter invalidated the Request
-        if let Some(request) = self {
-            // Check to see if the key is the wildcard token of '{}'
-            if key == "{}" {
-                // retrieve the headers map
-                let map = request.headers();
-                // If the value is {} and there are entries in the header map
-                // the return Some request as any value would match
-                if value == "{}" && map.len() > 0 {
-                    return Some(request);
-                }
-                // Iterate through the different values to see if any values
-                // match the inputed value
-                for v in map.values() {
-                    // if the values match return Some
-                    if value == *v {
-                        return Some(request);
-                    }
-                }
-            } else {
-                // Get the key and check if it's value is equal to the inputed value
-                // otherwise fall through to the end and return None
-                match request.headers().get(key) {
-                    Some(v) if value == *v || value == "{}" => return Some(request),
-                    _ => (),
-                }
-            }
-        }
-        // If the filter broke out, or self was None then return None
-        None
-    }
-    // The filter_path function for Option<&Request> first checks to see that the value of
-    // self is Some, then it checks to see if the path of the request matches the pattern.
-    // if they aren't an exact match then the filter checks to see if there are any variable
-    // wildcards {}.
-    fn filter_path(self, pattern : &str) -> Self {
-        // since the filter functions can return none, we can't perform any work (and shouldn't)
-        // if a previous filter invalidated the Request
-        if let Some(request) = self {
-            // get the path from the uri
-            let path = request.uri().path();
-            // check to see if the path and pattern equal eachother
-            if path == pattern {
-                return Some(request);
-            } else {
-                // create two iterators split on the forward slash for both
-                // the pattern given as an argument and the actual path of 
-                // the request being filtered
-                let mut split_pattern = pattern.split('/');
-                let mut split_path = path.split('/');
-                loop {
-                    // call next on each of the iterators
-                    let pattern_item = split_pattern.next();
-                    let path_item = split_path.next();
-                    match (pattern_item, path_item) {
-                        // if they both have a result check to see if the pattern is a wildcard or they equal eachother
-                        (Some(pattern), Some(path)) if pattern != "{}" && pattern != path => return None,
-                        // if the pattern or path end before one another then they are not the same length, thus not equal
-                        (None, Some(_)) | (Some(_), None) => return None,
-                        // if both the pattern and path end at the same time then they have been equal up to this point
-                        // and are assumed to be equal
-                        (None, None) => return Some(request),
-                        // if both the pattern and path are equal or the pattern is {} continue with the loop
-                        _ => ()
-                    }
-                }
-            }
-        }
-        // If the filter broke out, or self was None then return None
-        None
-    }
-    // The filter_path_prefix function for Option<&Request> first checks to see that the value of
-    // self is Some, then it checks to see if the path of the request matches the pattern.
-    // if they aren't an exact match then the filter checks to see if there are any variable
-    // wildcards {}.
-    fn filter_path_prefix(self, pattern : &str) -> Self {
-        // since the filter functions can return none, we can't perform any work (and shouldn't)
-        // if a previous filter invalidated the Request
-        if let Some(request) = self {
-            // get the path from the uri
-            let path = request.uri().path();
-            // check to see if the path and pattern equal eachother
-            if path == pattern {
-                return Some(request);
-            } else {
-                // create two iterators split on the forward slash for both
-                // the pattern given as an argument and the actual path of 
-                // the request being filtered
-                let mut split_pattern = pattern.split('/');
-                let mut split_path = path.split('/');
-                loop {
-                    // call next on each of the iterators
-                    let pattern_item = split_pattern.next();
-                    let path_item = split_path.next();
-                    match (pattern_item, path_item) {
-                        // since we are using the split operator if the pattern ends with a /
-                        // then there will be a lingering "". check to make sure it is a lingering
-                        // "" and not one in the middle of the pattern
-                        (Some(pattern), Some(path)) if pattern == "" && pattern != path => {
-                            match split_pattern.next() {
-                                Some(_) => return None,
-                                None => return Some(request),
-                            }
-                        }
-                        // check to see if the pattern and path differ
-                        (Some(pattern), Some(path)) if pattern != "{}" && pattern != path => return None,
-                        // if the path ends before the pattern then it is not a prefix
-                        (Some(_), None) => return None,
-                        // if the pattern ends before the path or they both end at the same time then its a prefix
-                        (None, Some(_)) | (None, None) => return Some(request),
-                        // if they equal eachother continue through the loop
-                        _ => ()
-                    }
-                }
-            }
-        }
-        // If the filter broke out, or self was None then return None
-        None
-    }
-    // The filter_method function for Option<&Request> first checks to see that the value of
-    // self is Some, then checks to see if the request method is equal to the inputed method.
-    fn filter_method<T>(self, method : T) -> Self where T : PartialEq<Method> {
-        // since the filter functions can return none, we can't perform any work (and shouldn't)
-        // if a previous filter invalidated the Request
-        if let Some(request) = self {
-            // check to see if the request method equals the method argument
-            if method == *request.method() {
-                return self;
-            }
-        }
-        // If the filter broke out, or self was None then return None
-        None
-    }
-    // The filter_scheme function for Option<&Request> first checks to see that the value of
-    // self is Some, then checks to see if the request scheme is equal to the inputed scheme.
-    fn filter_scheme(self, scheme : &str) -> Self {
-        if let Some(request) = self {
-            // check to see if the request scheme equals the scheme argument
-            match request.uri().scheme_str() {
-                Some(s) if s == scheme => return Some(request),
-                _ => (),
-            }
-        }
-        // If the filter broke out, or self was None then return None
-        None
-    }
-    // The filter_scheme function for Option<&Request> first checks to see that the value of
-    // self is Some, then checks to see if the request scheme is equal to the inputed scheme.
-    fn filter_custom(self, func : fn(&Request<R>) -> bool) -> Self {
-        if let Some(request) = self {
-            let result = func(request);
-            if result {
-                return self;
-            }
-        }
-       None
+    pub fn filter_custom(mut self, func : fn(&Request<R>) -> bool) -> Self {
+        self.request = self.request.filter(|r| func(r));
+        self
     }
 }
 
 /* ============================================================================================ */
 /*     Test Cases                                                                               */
 /* ============================================================================================ */
+
 #[test]
 fn test_root_route() {
     use http::request::Builder;
     use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/").body(()).unwrap();
     let filter = request.filter().filter_path("/");
-    assert!(filter.is_some());
+    assert!(filter.is_fufilled());
 }
 
 #[test]
@@ -520,7 +456,7 @@ fn test_full_route() {
     use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/this/is/a/longer/path").body(()).unwrap();
     let filter = request.filter().filter_path("/this/is/a/longer/path");
-    assert!(filter.is_some());
+    assert!(filter.is_fufilled());
 }
 
 #[test]
@@ -529,7 +465,16 @@ fn test_var_route() {
     use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/var/static").body(()).unwrap();
     let filter = request.filter().filter_path("/{}/static");
-    assert!(filter.is_some());
+    assert!(filter.is_fufilled());
+}
+
+#[test]
+fn test_mul_var_route() {
+    use http::request::Builder;
+    use crate::request::Extension;
+    let request = Builder::new().uri("https://www.rust-lang.org/var/static").body(()).unwrap();
+    let filter = request.filter().filter_path("/{val|var|temp}/static");
+    assert!(filter.is_fufilled());
 }
 
 #[test]
@@ -538,7 +483,7 @@ fn test_partial_route() {
     use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/this/is/different").body(()).unwrap();
     let filter = request.filter().filter_path("/this/is");
-    assert!(filter.is_none());
+    assert!(!filter.is_fufilled());
 }
 
 #[test]
@@ -547,7 +492,7 @@ fn test_pattern_route() {
     use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/").body(()).unwrap();
     let filter = request.filter().filter_path("this/is/longer");
-    assert!(filter.is_none());
+    assert!(!filter.is_fufilled());
 }
 
 #[test]
@@ -556,7 +501,7 @@ fn test_path_route() {
     use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/this/is/longer").body(()).unwrap();
     let filter = request.filter().filter_path("/");
-    assert!(filter.is_none());
+    assert!(!filter.is_fufilled());
 }
 
 #[test]
@@ -564,16 +509,16 @@ fn test_path_prefix() {
     use http::request::Builder;
     use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/this/is/longer").body(()).unwrap();
-    let filter = request.filter().filter_path_prefix("/");
-    assert!(filter.is_some());
-    let filter = request.filter().filter_path_prefix("/this/is");
-    assert!(filter.is_some());
-    let filter = request.filter().filter_path_prefix("/{}");
-    assert!(filter.is_some());
-    let filter = request.filter().filter_path_prefix("/this/is/longer/than/the/original");
-    assert!(filter.is_none());
-    let filter = request.filter().filter_path_prefix("/th");
-    assert!(filter.is_none());
+    let filter = request.filter().filter_path("/*");
+    assert!(filter.is_fufilled());
+    let filter = request.filter().filter_path("/this/is/*");
+    assert!(filter.is_fufilled());
+    let filter = request.filter().filter_path("/{}/*");
+    assert!(filter.is_fufilled());
+    let filter = request.filter().filter_path("/this/is/longer/than/the/original/*");
+    assert!(!filter.is_fufilled());
+    let filter = request.filter().filter_path("/th/*");
+    assert!(!filter.is_fufilled());
 }
 
 #[test]
@@ -582,8 +527,9 @@ fn test_different_route() {
     use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/this/is/different").body(()).unwrap();
     let filter = request.filter().filter_path("/not/even/close");
-    assert!(filter.is_none());
+    assert!(!filter.is_fufilled());
 }
+
 
 #[test]
 fn test_header() {
@@ -591,36 +537,67 @@ fn test_header() {
     use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/").header("key", "value").body(()).unwrap();
     let filter = request.filter().filter_header("key", "value");
-    assert!(filter.is_some());
+    assert!(filter.is_fufilled());
     let filter = request.filter().filter_header("key", "{}");
-    assert!(filter.is_some());
-    let filter = request.filter().filter_header("{}", "value");
-    assert!(filter.is_some());
-    let filter = request.filter().filter_header("{}", "{}");
-    assert!(filter.is_some());
+    assert!(filter.is_fufilled());
+}
+
+#[test]
+fn test_header_full(){
+    use http::request::Builder;
+    use crate::request::Extension;
+    let request = Builder::new().uri("https://www.rust-lang.org/").header("key", "value").body(()).unwrap();
+    let filter = request.filter().filter_header("?key", "{foo|bar|baz|value}");
+    assert!(filter.is_fufilled());
+    let filter = request.filter().filter_header("?key", "{foo|bar|baz}");
+    assert!(!filter.is_fufilled());
+}
+
+#[test]
+fn test_header_multiple_val(){
+    use http::request::Builder;
+    use crate::request::Extension;
+    let request = Builder::new().uri("https://www.rust-lang.org/").header("key", "value").body(()).unwrap();
+    let filter = request.filter().filter_header("key", "{foo|bar|baz|value}");
+    assert!(filter.is_fufilled());
+    let filter = request.filter().filter_header("key", "{foo|bar|baz}");
+    assert!(!filter.is_fufilled());
+}
+
+#[test]
+fn test_header_optional_key(){
+    use http::request::Builder;
+    use crate::request::Extension;
+    let request = Builder::new().uri("https://www.rust-lang.org/").header("key", "value").body(()).unwrap();
+    let filter = request.filter().filter_header("?key2", "{}");
+    assert!(filter.is_fufilled());
     let filter = request.filter().filter_header("key2", "value2");
-    assert!(filter.is_none());
+    assert!(!filter.is_fufilled());
 }
 
 #[test]
 fn test_query() {
     use http::request::Builder;
     use crate::request::Extension;
-    let request = Builder::new().uri("https://www.rust-lang.org/?one=two&three=four").body(()).unwrap();
+    let request = Builder::new().uri("https://www.rust-lang.org/?one=two&three=four&one%2Bone=two").body(()).unwrap();
     let filter = request.filter().filter_query("one", "two");
-    assert!(filter.is_some());
+    assert!(filter.is_fufilled());
     let filter = request.filter().filter_query("three", "four");
-    assert!(filter.is_some());
-    let filter = request.filter().filter_query("{}", "four");
-    assert!(filter.is_some());
+    assert!(filter.is_fufilled());
     let filter = request.filter().filter_query("one", "{}");
-    assert!(filter.is_some());
-    let filter = request.filter().filter_query("{}", "{}");
-    assert!(filter.is_some());
+    assert!(filter.is_fufilled());
+    let filter = request.filter().filter_query("one", "{one|two|three}");
+    assert!(filter.is_fufilled());
     let filter = request.filter().filter_query("one", "three");
-    assert!(filter.is_none());
+    assert!(!filter.is_fufilled());
+    let filter = request.filter().filter_query("?one", "three");
+    assert!(!filter.is_fufilled());
     let filter = request.filter().filter_query("five", "six");
-    assert!(filter.is_none());
+    assert!(!filter.is_fufilled());
+    let filter = request.filter().filter_query("?five", "six");
+    assert!(filter.is_fufilled());
+    let filter = request.filter().filter_query("one+one", "two");
+    assert!(filter.is_fufilled());
 }
 
 #[test]
@@ -630,11 +607,23 @@ fn test_method() {
     use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/").method("POST").body(()).unwrap();
     let filter = request.filter().filter_method("POST");
-    assert!(filter.is_some());
-    let filter = request.filter().filter_method(Method::POST);
-    assert!(filter.is_some());
-    let filter = request.filter().filter_method("GET");
-    assert!(filter.is_none());
+    assert!(filter.is_fufilled());
+    let filter = request.filter().filter_method(["POST"]);
+    assert!(filter.is_fufilled());
+    let filter = request.filter().filter_method([Method::POST]);
+    assert!(filter.is_fufilled());
+    let filter = request.filter().filter_method(["GET"]);
+    assert!(!filter.is_fufilled());
+}
+
+#[test]
+fn test_methods() {
+    use http::request::Builder;
+    use http::method::Method;
+    use crate::request::Extension;
+    let request = Builder::new().uri("https://www.rust-lang.org/").method("POST").body(()).unwrap();
+    let filter = request.filter().filter_method([Method::DELETE, Method::PUT, Method::POST]);
+    assert!(filter.is_fufilled());
 }
 
 #[test]
@@ -643,9 +632,9 @@ fn test_custom() {
     use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/").body(()).unwrap();
     let filter = request.filter().filter_custom(|_| true);
-    assert!(filter.is_some());
+    assert!(filter.is_fufilled());
     let filter = request.filter().filter_custom(|_| false);
-    assert!(filter.is_none());
+    assert!(!filter.is_fufilled());
 }
 
 #[test]
@@ -654,9 +643,9 @@ fn test_scheme() {
     use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/").body(()).unwrap();
     let filter = request.filter().filter_scheme("https");
-    assert!(filter.is_some());
+    assert!(filter.is_fufilled());
     let filter = request.filter().filter_scheme("http");
-    assert!(filter.is_none());
+    assert!(!filter.is_fufilled());
 }
 
 #[test]
@@ -665,7 +654,7 @@ fn test_multiple_filters(){
     use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/").method("POST").body(()).unwrap();
     let filter = request.filter().filter_scheme("https").filter_method("POST");
-    assert!(filter.is_some());
+    assert!(filter.is_fufilled());
     let filter = request.filter().filter_scheme("http").filter_method("get");
-    assert!(filter.is_none());
+    assert!(!filter.is_fufilled());
 }

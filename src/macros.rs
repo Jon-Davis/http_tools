@@ -86,7 +86,7 @@ fn test_handler() {
     assert!(test(Some(1)) == false);
     assert!(test(None) == false);
 }
-
+/*
 #[test]
 fn test_filter() {
     use crate::request::{Extension, Filter};
@@ -115,3 +115,4 @@ fn test_filter() {
     assert!(test(&get_request).status() == 200u16);
     assert!(test(&bad_request).status() == 400u16);
 }
+*/
