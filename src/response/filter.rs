@@ -56,7 +56,7 @@ const WILDCARD : &str = "{}";
 /// // given an http::response::Response
 /// response
 ///     // Creates an Option<&Response>, each fiter returns Some(req) if it passes and None if it fails
-///     .filter()
+///     .filter_http()
 ///     // The header has the key content-type with a value of application/x-www-form-urlencoded
 ///     .filter_header("content-type", "application/x-www-form-urlencoded")
 ///     // The {} wild card can be used to filter headers aswell
@@ -84,11 +84,11 @@ pub trait Filter<'a, R> {
     ///                 .body(()).unwrap();
     /// 
     /// // matches when the key is key and value is value
-    /// let filter = response.filter().filter_header("key", "value");
+    /// let filter = response.filter_http().filter_header("key", "value");
     /// assert!(filter.is_some());
     /// 
     /// // matches when the key exists
-    /// let filter = response.filter().filter_header("key", "{}");
+    /// let filter = response.filter_http().filter_header("key", "{}");
     /// assert!(filter.is_some());
     /// ```
     fn filter_header<T>(self, key : &str, value : T) -> Self where T : PartialEq<HeaderValue> + PartialEq<&'static str>;
@@ -105,7 +105,7 @@ pub trait Filter<'a, R> {
     ///                     .body(()).unwrap();
     /// 
     /// // this will match as the response has an extension of type i32
-    /// let filter = response.filter().filter_custom(|req| req.extensions().get::<i32>().is_some());
+    /// let filter = response.filter_http().filter_custom(|req| req.extensions().get::<i32>().is_some());
     /// assert!(filter.is_some());
     /// ```
     fn filter_custom(self, func : fn(&Response<R>) -> bool) -> Self;
@@ -124,7 +124,7 @@ pub trait Filter<'a, R> {
     ///                     .body(()).unwrap();
     /// 
     /// // this will match as the response has an extension of type i32
-    /// let filter = response.filter().filter_status(StatusCode::OK);
+    /// let filter = response.filter_http().filter_status(StatusCode::OK);
     /// assert!(filter.is_some());
     /// ```
     fn filter_status<T>(self, status : T) -> Self where StatusCode : PartialEq<T>;
@@ -154,7 +154,7 @@ impl<'a, R> Filter<'a, R> for Option<&Response<R>>{
                 let map = response.headers();
                 // If the value is {} and there are entries in the header map
                 // the return Some response as any value would match
-                if value == WILDCARD && map.len() > 0 {
+                if value == WILDCARD && !map.is_empty() {
                     return Some(response);
                 }
                 // Iterate through the different values to see if any values
@@ -212,18 +212,18 @@ fn test_header() {
     let mut header = HeaderValue::from_str("value").unwrap();
     header.set_sensitive(true);
     let response = Builder::new().header("key", header).body(()).unwrap();
-    let filter = response.filter().filter_header("key", "value");
+    let filter = response.filter_http().filter_header("key", "value");
     assert!(filter.is_some());
-    let filter = response.filter().filter_header("key", "{}");
+    let filter = response.filter_http().filter_header("key", "{}");
     assert!(filter.is_some());
-    let filter = response.filter().filter_header("{}", "value");
+    let filter = response.filter_http().filter_header("{}", "value");
     assert!(filter.is_some());
     let header = HeaderValue::from_str("value").unwrap();
-    let filter = response.filter().filter_header("{}", header);
+    let filter = response.filter_http().filter_header("{}", header);
     assert!(filter.is_some());
-    let filter = response.filter().filter_header("{}", "{}");
+    let filter = response.filter_http().filter_header("{}", "{}");
     assert!(filter.is_some());
-    let filter = response.filter().filter_header("key2", "value2");
+    let filter = response.filter_http().filter_header("key2", "value2");
     assert!(filter.is_none());
 }
 
@@ -232,9 +232,9 @@ fn test_custom() {
     use http::response::Builder;
     use crate::response::Extension;
     let response = Builder::new().body(()).unwrap();
-    let filter = response.filter().filter_custom(|_| true);
+    let filter = response.filter_http().filter_custom(|_| true);
     assert!(filter.is_some());
-    let filter = response.filter().filter_custom(|_| false);
+    let filter = response.filter_http().filter_custom(|_| false);
     assert!(filter.is_none());
 }
 
@@ -243,12 +243,12 @@ fn test_status() {
     use http::response::Builder;
     use crate::response::Extension;
     let response = Builder::new().status(StatusCode::OK).body(()).unwrap();
-    let filter = response.filter().filter_status(StatusCode::OK);
+    let filter = response.filter_http().filter_status(StatusCode::OK);
     assert!(filter.is_some());
-    let filter = response.filter().filter_status(200);
+    let filter = response.filter_http().filter_status(200);
     assert!(filter.is_some());
-    let filter = response.filter().filter_status(500);
+    let filter = response.filter_http().filter_status(500);
     assert!(filter.is_none());
-    let filter = response.filter().filter_status(1000);
+    let filter = response.filter_http().filter_status(1000);
     assert!(filter.is_none());
 }

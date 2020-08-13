@@ -29,312 +29,313 @@
 use http::request::Request;
 use http::method::Method;
 use http::header::HeaderValue;
-use crate::encoding::PercentEncodedStr;
-use crate::request::query_iter;
-use crate::interface::HttpToolsContainer;
+use crate::request::{query_iter, FilterStatus, Handlers, HandlerResult};
+use std::marker::PhantomData;
 
-/// The filter trait allows for the easy filtering of requests. They can be chained
-/// together to create more complex filters. 
-/// 
-/// Filters were designed to be used in making an http router, but can be used in many more ways. 
-/// The trait always outputs an Option<&Request>. If the option is Some then the underlying 
-/// filter applies to the request, if the request is None then request did not pass the filter. 
-/// The filter trait is implemented on both a Request and an Option<&Request>
-/// # Syntax
-/// ```
-/// # use http::request::Builder;
-/// use http_tools::request::{Filter, Extension};
-/// # let request = Builder::new()
-/// #                .uri("https://www.rust-lang.org/item/rust?cool=rust&also+cool=go")
-/// #                .extension(-1i32)
-/// #                .method("POST")
-/// #                .header("content-type", "application/x-www-form-urlencoded")
-/// #                .header("content-length", "0")
-/// #                .body(()).unwrap();
-/// 
-/// // given an http::request::Request
-/// request
-///     // Creates an Option<&Request>, each fiter returns Some(req) if it passes and None if it fails
-///     .filter()
-///     // match the path /item/{} where {} is a wild card
-///     .filter_path("/item/{}")
-///     // request has the method of type POST
-///     .filter_method("POST")
-///     // The header has the key content-type with a value of application/x-www-form-urlencoded
-///     .filter_header("content-type", "application/x-www-form-urlencoded")
-///     // The {} wild card can be used to filter headers aswell
-///     .filter_header("content-length", "{}")
-///     // The query has the key cool with the value rust
-///     .filter_query("cool", "rust")
-///     // the wild card {} can be used in queries, filters do not decode uri encodings
-///     .filter_query("also+cool", "{}")
-///     // custom filters can be applied, and will be given the request and return a bool
-///     .filter_custom(|req| req.extensions().get::<i32>().is_some())
-///     // The request has a scheme of https
-///     .filter_scheme("https")
-///     // filters simply return std Option where Some means pass and None means failed
-///     .and_then(|_request| Some("I passed the test!"));
-///  ```
-/// 
-/// Since all filters simply take a refrence to a Request and return an Option, the filters can be applied
-/// in a number of different ways. For example the below router ensures that the Request is authenticated before
-/// routing it.
-/// ```
-/// # use http::request::{Request, Builder};
-/// use http_tools::request::{Extension, Filter};
-/// # let request = Builder::new()
-/// #                .uri("https://www.rust-lang.org/item/rust?cool=rust&also+cool=go")
-/// #                .body(()).unwrap();
-/// # fn some_handler<R>(req : &Request<R>) -> Option<()> {None};
-/// # fn some_other_handler<R>(req : &Request<R>) -> Option<()>{None};
-/// 
-/// // The following filter must pass for any of the other handlers to pass
-/// let parent_filter = request.filter()
-///     .filter_header("Authorization", "type token");
-/// 
-/// // check to see if the request is equal, if so call the handler function
-/// parent_filter
-///     .filter_path("/")
-///     .and_then(|req| some_handler(req));
-/// 
-/// // if the above function didn't match we check the next one and if this one
-/// // matches then we call some other handler function
-/// parent_filter
-///     .filter_path("/{}")
-///     .and_then(|req| some_other_handler(req));
-/// ```
-/// 
-/// If you only ever want 1 handler function to be applied, then it is more efficent to test
-/// each filter afterwards, and return the output
-/// ```
-/// # use http::{Request, Response, StatusCode};
-/// use http_tools::request::{Extension, Filter};
-/// # let request = Request::builder()
-/// #                .uri("https://www.rust-lang.org/item/rust?cool=rust&also+cool=go")
-/// #                .body(()).unwrap();
-/// # fn some_handler<R>(req : &Request<R>) -> Response<()> { Response::builder().body(()).unwrap() };
-/// # fn some_other_handler<R>(req : &Request<R>) -> Response<()>{ Response::builder().body(()).unwrap() };
-/// 
-/// fn mux<R>(request : &Request<R>) -> Response<()> {
-///     // Check the first filter
-///     let filter = request.filter()
-///         .filter_method("GET")
-///         .filter_path("/");
-///     if let Some(req) = filter {
-///         return some_handler(req);
-///     }
-///     
-///     // check the second filter
-///     let filter = request.filter()
-///         .filter_method("GET")
-///         .filter_path("/{}");
-///     if let Some(req) = filter {
-///         return some_other_handler(req);
-///     }
-/// 
-///     return Response::builder()
-///         .status(StatusCode::NOT_FOUND)
-///         .body(())
-///         .unwrap()
-/// }
-///
-/// ```
-pub struct Filter<'a, R> {
-    request: Option<&'a Request<R>>,
-    response : Option<&'a dyn Fn(&'a Request<R>) -> http::response::Builder>,
+type ResponseHandler<'a, R> = Option<fn(&'a Request<R>) -> HandlerResult>;
+pub struct Filter<'a, R, H : Handlers<R>> {
+    request: &'a Request<R>,
+    response : ResponseHandler<'a, R>,
+    pass_throughs : u8,
+    committed: bool,
+    status : FilterStatus,
+    handlers : PhantomData<H>,
 }
 
-impl<'a, R> Filter<'a, R>{
-    // Constructs a new Filter given a &Request
-    pub fn new(request : &'a Request<R>) -> Filter<'a, R> {
+
+impl<'a, R, H : Handlers<R>> Filter<'a, R, H>{
+    /// Constructs a new Filter given a &Request, It is recommended to use request::Extension::new() or
+    /// request::Extension::new_with_handlers() to construct a filter
+    pub(crate) fn new(request : &'a Request<R>) -> Filter<'a, R, H> {
         Filter{
+            request,
             response: None,
-            request: Some(request),
+            status: FilterStatus::Pass,
+            pass_throughs: 0,
+            committed: false,
+            handlers: PhantomData,
+        }
+    }
+    /// Shorthand function to cause a failure and return self
+    fn fail(mut self, status : FilterStatus) -> Self {
+        self.status = status;
+        self
+    }
+
+    /// Shorthand function to pass a function, wiping the previous handler
+    fn pass(self) -> Self {
+        self
+    }
+
+    /// Shorthand function when a passing through a failed filter is required
+    fn pass_through(mut self) -> Self {
+        self.pass_throughs = self.pass_throughs.saturating_add(1);
+        self
+    }
+
+    pub fn on_fail(mut self, handler: fn(&'a Request<R>) -> HandlerResult) -> Self {
+        if self.pass_throughs == 0 && self.status != FilterStatus::Pass {
+            self.response = Some(handler);
+            self.commit().pass_through()
+        } else {
+            self
         }
     }
 
-    /// Returns true if the filter has passed all of the checks, false if it has failed atleast one
-    pub fn is_fufilled(&self) -> bool {
-        self.request.is_some()
-    }
-
-    /// Checks to see if the request has the specified key and value. The wildcard '{}'
-    /// pattern can be used to match any value, multiple values can be specified with {value1|value2},
-    /// optional keys begin with '?'.
+    /// Handle consumes the filter, it's behavior is dependent on the state of the filter
+    ///
+    /// * If the filter is passing, then the closure passed as an argument will be run. As a result
+    /// `handle()` will return Some(Result<Response>).
+    /// * If the filter is failing, but a response handler was set through an `on_fail()` method while the
+    /// filter was passing, then that function will be called to generate a response. As a result `handle()`
+    /// will return Some(Result<Response>).
+    /// * If the filter is failing, but the `commit()` function was called while the filter was passing, and
+    /// there is no response handler set by the `on_fail` function. Then the default handler for the filter
+    /// will be run. As a result `handle()` will return Some(Result<Response>).
+    /// * Otherwise the filter failed before it was committed. As a result `handle()` will return None.
+    ///
     /// # Example
     /// ```
-    /// use http::request::Builder;
-    /// use http_tools::request::{Extension, Filter};
-    /// 
-    /// // Request Builder found in http crate
-    /// let request = Builder::new()
-    ///                 .uri("https://www.rust-lang.org/")
-    ///                 .header("key", "value")
-    ///                 .body(()).unwrap();
-    /// 
-    /// // matches when the key is 'key' and value is 'value'
-    /// let filter = request.filter().filter_header("key", "value");
-    /// assert!(filter.is_fufilled());
-    /// 
-    /// // fails only if the key is present and the value does not match the pattern
-    /// // if the key is absent this will succeed, or if the key exists and the value pattern matches
-    /// let filter = request.filter().filter_header("?different_key", "different_value");
-    /// assert!(filter.is_fufilled()); // still matches because different_key isn't set
-    /// 
-    /// // matches when the key exists
-    /// let filter = request.filter().filter_header("key", "{}");
-    /// assert!(filter.is_fufilled());
-    /// 
-    /// // matches when the key is one of the following
-    /// let filter = request.filter().filter_header("key", "{foo|bar|baz|value}");
-    /// assert!(filter.is_fufilled());
-    /// 
+    /// use bytes::Bytes;
+    /// use http::{request, response, method::Method};
+    /// use http_tools::request::Extension;
+    ///
+    /// # let request = request::Builder::new()
+    /// #                    .uri("https://www.rust-lang.org/")
+    /// #                    .method(Method::GET)
+    /// #                    .body(Bytes::new())
+    /// #                    .unwrap();
+    /// // This passing filter is looking for a path of `/` and a method of GET
+    /// let response = request.filter_http()
+    ///                     .filter_path("/") 
+    ///                     .filter_method(Method::GET)
+    ///                     .handle(|_| Ok(Default::default()));
+    /// // Default::default() http response returns an empty 200
+    /// assert!(response.unwrap().unwrap().status() == 200);
+    ///
+    /// // This failing filter is looking for a path of `/` and a method of POST
+    /// let response = request.filter_http()
+    ///                     .filter_path("/")
+    ///                     .commit()
+    ///                     .filter_method(Method::POST)
+    ///                     .handle(|_| Ok(Default::default()));
+    /// // The default handler returns a 405 Method not found when a filter_method() fails
+    /// assert!(response.unwrap().unwrap().status() == 405);
+    ///
+    /// // This failing filter is looking for a path of `/failed/path`
+    /// let response = request.filter_http()
+    ///                     .filter_path("/failed/path")
+    ///                     .on_fail(|_| Ok(response::Builder::new()
+    ///                         .status(123)
+    ///                         .body(Bytes::new())?))
+    ///                     .filter_method(Method::POST)
+    ///                     .handle(|_| Ok(Default::default()));
+    /// // Since the previous filter failed, the on_fail response is run by handle
+    /// assert!(response.unwrap().unwrap().status() == 123);
     /// ```
-    pub fn filter_header<T : HttpToolsContainer<HeaderValue>>(mut self, key : &str, value : T) -> Self {
-        // since the filter functions can return none, we can't perform any work (and shouldn't)
-        // if a previous filter invalidated the Request
-        self.request = self.request.and_then(|request| {
-            let (key, optional) = if key.starts_with('?') { 
-                (key.get(1..).unwrap_or(""), true) 
-            } else {
-                (key, false)
-            };
+    pub fn handle(self, handler: fn(&'a Request<R>) -> HandlerResult) -> Option<HandlerResult> {
+        match (self.response, self.committed, self.status) {
+            (Some(handler), _, _) => Some(handler(self.request)),
+            (None, _, FilterStatus::Pass) => Some(handler(self.request)),
+            (None, true, _) => Some(H::handle(self.request, self.status)),
+            _ => None,
+        }
+    }
 
-            match (request.headers().get(key), optional) {
-                // if the header exists and the header_value is contained in value, the filter passes
-                (Some(header_value),_) if value.http_tools_contains(header_value) => Some(request),
-                // if the header was not found and the optional flag was set, the filter passes
-                (None,true) => Some(request),
-                // otherwise the filter failes
-                _ => None
-            }
-        });
+    /// Commits to returning some response if all previous filters passed. If a filter fails and no 
+    /// `on_fail()` handler was specified than the default handler will be run. The `handle()` method
+    /// returns a `Option<Result<Response, Error>>`. If commit is called while the filter is passing
+    /// handle is guaranteed to return `Some(_)`. If the filter has already failed before commit is called
+    /// then handle is guaranteed to return `None`. Other methods like `on_fail()` and `handle()` 
+    /// implicitly commit the filter.no
+    /// # Example
+    /// ```
+    /// use bytes::Bytes;
+    /// use http::{request, response, method::Method};
+    /// use http_tools::request::Extension;
+    ///
+    /// // This request has a path of `/` and a method of GET
+    /// let request = request::Builder::new()
+    ///                     .uri("https://www.rust-lang.org/")
+    ///                     .method(Method::GET)
+    ///                     .body(Bytes::new())
+    ///                     .unwrap();
+    ///
+    /// // This filter is looking for a path of `/` and a method of POST
+    /// let response = request.filter_http()
+    ///                     .filter_path("/") 
+    ///                     .commit() // Only commit if the path matches up
+    ///                     .filter_method(Method::POST)
+    ///                     .handle(|_| Ok(response::Builder::new()
+    ///                         .status(200)
+    ///                         .body(Bytes::from("Hello World"))?));
+    ///
+    /// // Because the filter committed after filter_path which evaluated to true
+    /// // The response is guaranteed to be Some(), in this case we assume that a valid
+    /// // response::Response object was created.
+    /// let response = response.unwrap().unwrap();
+    /// // The filter_method function failed, which means that the handle closure will not be
+    /// // called, instead the default handler will be called, since the failure was during a
+    /// // filter_method function the status will be 405 Method not Allowed.
+    /// assert!(response.status() == 405);
+    /// assert!(*response.body() == Bytes::new());
+    /// ```
+    pub fn commit(mut self) -> Self {
+        if self.status == FilterStatus::Pass {
+            self.committed = true;
+        }
         self
     }
-    /// Checks to see if the uri contains a query with the given key and value. The wildcard '{}'
-    /// pattern can be used to match any value, multiple values can be specified with {value1|value2},
-    /// optional keys begin with '?'.
+
+    /// Returns true if the filter has passed all of the checks, false if it has failed at least one
+    /// # Example
+    /// ```
+    /// # use http::request::Builder;
+    /// use http_tools::request::{Extension, Filter};
+    /// 
+    /// # // Request Builder found in http crate
+    /// # let request = Builder::new()
+    /// #                .uri("https://www.rust-lang.org/")
+    /// #                .header("key", "value")
+    /// #                .body(()).unwrap();
+    /// 
+    /// let filter = request.filter_http();
+    /// assert!(filter.valid());
+    /// 
+    /// let filter = request.filter_http().filter_custom(|_| false);
+    /// assert!(!filter.valid());
+    /// ```
+    pub fn valid(&self) -> bool {
+        self.status == FilterStatus::Pass
+    }
+
+    /// Checks to see if the request has the specified key and value stored in a header. 
+    /// # Example
+    /// ```
+    /// # use http::request::Builder;
+    /// # use bytes::Bytes;
+    /// use http_tools::request::Extension;
+    /// 
+    /// # // Request Builder found in http crate
+    /// # let request = Builder::new()
+    /// #                .uri("https://www.rust-lang.org/")
+    /// #                .header("Content-Type", "application/x-www-form-urlencoded")
+    /// #                .body(Bytes::new()).unwrap();
+    /// let filter = request.filter_http()
+    ///                 .filter_header("Content-Type", "application/x-www-form-urlencoded");
+    /// 
+    /// assert!(filter.valid());
+    /// ```
+    pub fn filter_header<V>(self, key : &str, value : V) -> Self where HeaderValue : PartialEq<V>{
+        if self.status != FilterStatus::Pass { return  self.pass_through(); }
+        match self.request.headers().get(key) {
+            // if the header exists and the header_value is contained in value, the filter passes
+            Some(header_value) if *header_value == value => self.pass(),
+            // otherwise the filter fails
+            _ => self.fail(FilterStatus::FailFilterHeader)
+        }
+    }
+
+    /// Checks to see if the uri contains a query with the given key and value. The key and value
+    /// can be either url encoded or url decoded. 
+    ///
+    /// **NOTE** When matching on url encoded key and values the match is verbatim. So if the key
+    /// is "Hello%20World" it will not match "Hello+World". However both "Hello%20World" and "Hello+World"
+    /// will match "Hello World".
     /// # Example
     /// ```
     /// use http::request::Builder;
     /// use http_tools::request::{Extension, Filter};
     /// // Request Builder found in http crate
     /// let request = Builder::new()
-    ///                     .uri("https://www.rust-lang.org/?one%2Bone=two") // <-- query is decoded
+    ///                     .uri("https://www.rust-lang.org/?one+%2B+one=two")
     ///                     .body(()).unwrap();
     /// 
-    /// // this will match as the value of one+one is two
-    /// let filter = request.filter().filter_query("one+one", "two");
-    /// assert!(filter.is_fufilled());
     /// 
-    /// // this will match because the key of one+one exists
-    /// let filter = request.filter().filter_query("one+one", "{}");
-    /// assert!(filter.is_fufilled());
-    /// 
-    /// // this will match because the key of one+one is one of the values
-    /// let filter = request.filter().filter_query("one+one", "{one|two|three}");
-    /// assert!(filter.is_fufilled());
-    /// 
-    /// // this will NOT match because the key does not exist
-    /// let filter = request.filter().filter_query("two+two", "four");
-    /// assert!(!filter.is_fufilled());
-    /// 
-    /// // If a query key is optional the ? can be used in the key
-    /// // which will match when the key is found and equal to the value pattern
-    /// // or if the key is not found
-    /// let filter = request.filter().filter_query("?two+two", "four");
-    /// assert!(filter.is_fufilled());
+    /// let filter = request.filter_http()
+    ///         // The key and value will be url decoded
+    ///         .filter_query("one + one", "two")
+    ///         // The url encoded strings will match verbatim  
+    ///         .filter_query("one+%2B+one", "two");
+    ///         
+    ///         
+    /// assert!(filter.valid());
     /// ```
-    pub fn filter_query<T : HttpToolsContainer<PercentEncodedStr<'a>>>(mut self, key : &str, value : T) -> Self {
-        // since the filter functions can return none, we can't perform any work (and shouldn't)
-        // if a previous filter invalidated the Request
-        self.request = self.request.and_then(|request| {
-            let (key, optional) = if key.starts_with('?') { 
-                (key.get(1..).unwrap_or(""), true) 
-            } else {
-                (key, false)
-            };
-            // iterate through the querys
-            query_iter(&request).filter(|(k,_)| *k == key).nth(0)
-                .map_or_else(|| Some(request).filter(|_| optional), 
-                             |(_,v)| Some(request).filter(|_| value.http_tools_contains(&v)))
-        });
+    pub fn filter_query(self, key : &str, value : &str) -> Self {
+        if self.status != FilterStatus::Pass { return  self.pass_through(); }
+        // iterate through the query
+        let filter = query_iter(self.request)
+            .find(|(k,_)| *k == key)
+            .filter(|(_,v)| *v == value).is_some();
         
-        self
+        if filter {
+            self.pass()
+        } else {
+            self.fail(FilterStatus::FailFilterQuery)
+        }
     }
-    /// Checks to see if the requests path matches the specified pattern. The wildcard '{}'
-    /// pattern can be used can be used to match any text between foward slashes
-    /// so '/{}' will match '/any' but not '/any/more'. For mathcing the rest of the pattern the
-    /// terminator '*' can be used so '/*' will match all paths. For a set of matches the pattern
-    /// {First|Second|Third} can be used so /{var|val}/* will match any path starting with var or val.
+    /// Checks to see if the requests path matches the specified pattern. The '{}'
+    /// pattern can be used can be used to match any text between forward slashes
+    /// so '/{}' will match '/any' but not '/any/more'. For matching the rest of the pattern the
+    /// pattern '*' can be used so '/*' will match all paths. 
     /// # Example
     /// ```
     /// use http::request::Builder;
+    /// use bytes::Bytes;
     /// use http_tools::request::{Extension, Filter};
     /// 
     /// // Request Builder found in http crate
     /// let request = Builder::new()
     ///                     .uri("https://www.rust-lang.org/var/static")
-    ///                     .body(()).unwrap();
+    ///                     .body(Bytes::new()).unwrap();
     /// 
-    /// // this will match because the paths are exact
-    /// let filter = request.filter().filter_path("/var/static");
-    /// assert!(filter.is_fufilled());
+    /// // this will match because the paths are an exact match
+    /// let filter = request.filter_http().filter_path("/var/static");
+    /// assert!(filter.valid());
     /// 
     /// // this will not match as the pattern is different
-    /// let filter = request.filter().filter_path("/something/different");
-    /// assert!(!filter.is_fufilled());
+    /// let filter = request.filter_http().filter_path("/something/different");
+    /// assert!(!filter.valid());
     /// 
     /// // this will match because the wildcard '{}' will match var
-    /// let filter = request.filter().filter_path("/{}/static");
-    /// assert!(filter.is_fufilled());
+    /// let filter = request.filter_http().filter_path("/{}/static");
+    /// assert!(filter.valid());
     /// 
     /// // this will not match as the pattern is too short
-    /// let filter = request.filter().filter_path("/");
-    /// assert!(!filter.is_fufilled());
+    /// let filter = request.filter_http().filter_path("/");
+    /// assert!(!filter.valid());
+    ///
+    /// // this will not match as the pattern is too long
+    /// let filter = request.filter_http().filter_path("/var/static/oops");
+    /// assert!(!filter.valid());
     /// 
     /// // this will match because the '*' token means match all remaining
-    /// let filter = request.filter().filter_path("/*");
-    /// assert!(filter.is_fufilled());
-    /// 
-    /// // this will match because one of the options is the correct path
-    /// let filter = request.filter().filter_path("/{var|val|temp}/static");
-    /// assert!(filter.is_fufilled());
+    /// let filter = request.filter_http().filter_path("/*");
+    /// assert!(filter.valid());
     /// ```
-    pub fn filter_path(mut self, pattern : &str) -> Self {
-        // since the filter functions can return none, we can't perform any work (and shouldn't)
-        // if a previous filter invalidated the Request
-        self.request = self.request.and_then(|request| {
-            // get the path from the uri
-            let path = request.uri().path();
-            // check to see if the path and pattern equal eachother
-            if path == pattern { return Some(request); }
-
-            // create two iterators split on the forward slash for both
-            // the pattern given as an argument and the actual path of 
-            // the request being filtered
-            let (mut split_pattern, mut split_path) = (pattern.split('/'), path.split('/'));
-            loop {
-                // call next on each of the iterators
-                return match (split_pattern.next(), split_path.next()) {
-                    // if the pattern matches equals '*' then the rest of the path is accepted
-                    (Some(pattern), _) if pattern == "*" => Some(request),
-                    // if they both have a result check to see if the pattern is a wildcard or they equal eachother
-                    (Some(pattern), Some(path)) if !pattern.http_tools_contains(&path) => None,
-                    // if the pattern or path end before one another then they are not the same length, thus not equal
-                    (None, Some(_)) | (Some(_), None) => None,
-                    // if both the pattern and path end at the same time then they have been equal up to this point
-                    // and are assumed to be equal
-                    (None, None) => Some(request),
-                    // if both the pattern and path are equal or the pattern is {} continue with the loop
-                    _ => continue,
-                };
-            }
-        });
-        // If the filter broke out, or self was None then return None
-        self
+    pub fn filter_path(self, pattern : &str) -> Self {
+        if self.status != FilterStatus::Pass { return  self.pass_through(); }
+        // get the path from the uri
+        let path = self.request.uri().path();
+        // Return if the two are exactly equal
+        if pattern == path { return self.pass() }
+        // create two iterators split on the forward slash for both
+        // the pattern given as an argument and the actual path of 
+        // the request being filtered
+        let (mut split_pattern, mut split_path) = (pattern.split('/'), path.split('/'));
+        loop {
+            // call next on each of the iterators
+            return match (split_pattern.next(), split_path.next()) {
+                (Some("*"), _) => self.pass(),
+                (None, Some(_)) | (Some(_), None) => self.fail(FilterStatus::FailFilterPath),
+                (Some("{}"), Some(_)) => continue,
+                (Some(pattern), Some(path)) if pattern == path => continue,
+                (Some(_), Some(_)) => self.fail(FilterStatus::FailFilterPath),
+                (None, None) => self.pass(),
+            };
+        }
     }
-    /// Checks to see if the request has the inputed method.
+    /// Checks to see if the request has the inputted method. If using a str the method must be upper case for the match to succeed.
     /// # Example
     /// ```
     /// use http::request::Builder;
@@ -348,21 +349,27 @@ impl<'a, R> Filter<'a, R>{
     ///                     .body(()).unwrap();
     /// 
     /// // this will match the method
-    /// let filter = request.filter().filter_methods(&["GET"]);
-    /// assert!(filter.is_fufilled());
+    /// let filter = request.filter_http().filter_method("GET");
+    /// assert!(filter.valid());
     /// 
     /// // this will not 
-    /// let filter = request.filter().filter_methods(&["POST"]);
-    /// assert!(filter.is_fufilled());
+    /// let filter = request.filter_http().filter_method("POST");
+    /// assert!(!filter.valid());
     /// 
-    /// // multiple methods can be specified
-    /// let filter = request.filter().filter_methods(&[Method::DELETE, Method::PUT, Method::GET])
-    /// assert!(filter.is_fufilled());
+    /// // http::Method can also be used
+    /// let filter = request.filter_http().filter_method(Method::GET);
+    /// assert!(filter.valid());
     /// ```
-    pub fn filter_method<T : HttpToolsContainer<Method>>(mut self, methods : T) -> Self {
-        // don't perform work if filter is already false
-        self.request = self.request.filter(|r| methods.http_tools_contains(r.method()));
-        self
+    pub fn filter_method<T>(self, method : T) -> Self where Method : PartialEq<T>{
+        if self.status != FilterStatus::Pass { return  self.pass_through(); }
+        // check to see if the method is successful
+        if *self.request.method() == method { 
+            self.pass()
+        } else {
+            // otherwise calculate valid methods
+            self.fail(FilterStatus::FailFilterMethod)
+        }
+
     }
     /// Checks to see if the request has given scheme
     /// # Example
@@ -375,44 +382,47 @@ impl<'a, R> Filter<'a, R>{
     ///                     .body(()).unwrap();
     /// 
     /// // this will match
-    /// let filter = request.filter().filter_scheme("https");
-    /// assert!(filter.is_some());
+    /// let filter = request.filter_http().filter_scheme("https");
+    /// assert!(filter.valid());
     /// // this will not 
-    /// let filter = request.filter().filter_scheme("http");
-    /// assert!(filter.is_none());
+    /// let filter = request.filter_http().filter_scheme("http");
+    /// assert!(!filter.valid());
     /// ```
-    pub fn filter_scheme<T : HttpToolsContainer<&'a str>>(mut self, scheme : T) -> Self {
+    pub fn filter_scheme(self, scheme : &str) -> Self {
+        if self.status != FilterStatus::Pass { return self.pass_through(); }
         // check to see if the request scheme equals the scheme argument
-        self.request = self.request.and_then(|request| {
-            request.uri().scheme_str().filter(|s | scheme.http_tools_contains(&s)).map(|_| request)
-        });
-        // If the filter broke out, or self was None then return None
-        self
+        if self.request.uri().scheme_str().filter(|s| *s == scheme).is_some() {
+            self.pass()
+        } else {
+            self.fail(FilterStatus::FailFilterQuery)
+        }
+
     }
-    /// Checks to see if the request has given scheme
+    /// Checks to see if the request has given port
     /// # Example
     /// ```
     /// use http::request::Builder;
     /// use http_tools::request::{Extension, Filter};
     /// // Request Builder found in http crate
     /// let request = Builder::new()
-    ///                     .uri("https://www.rust-lang.org/")
+    ///                     .uri("https://www.rust-lang.org:200/")
     ///                     .body(()).unwrap();
     /// 
     /// // this will match
-    /// let filter = request.filter().filter_scheme("https");
-    /// assert!(filter.is_some());
+    /// let filter = request.filter_http().filter_port(200);
+    /// assert!(filter.valid());
     /// // this will not 
-    /// let filter = request.filter().filter_scheme("http");
-    /// assert!(filter.is_none());
+    /// let filter = request.filter_http().filter_port(404);
+    /// assert!(!filter.valid());
     /// ```
-    pub fn filter_ports<T : HttpToolsContainer<u16>>(mut self, ports : T) -> Self {
+    pub fn filter_port(self, port : u16) -> Self {
         // check to see if the request scheme equals the scheme argument
-        self.request = self.request.and_then(|request| {
-            request.uri().port_u16().filter(|p| ports.http_tools_contains(p)).map(|_| request)
-        });
-        // If the filter broke out, or self was None then return None
-        self
+        if self.status != FilterStatus::Pass { return self.pass_through(); }
+        if self.request.uri().port_u16().filter(|p| *p == port).is_some() {
+            self.pass()
+        } else {
+            self.fail(FilterStatus::FailFilterPort)
+        }
     }
     /// filter_custom allows for a custom function filter. The filter will be given a &Request and
     /// will output a bool. if the bool is true, then function returns Some, if it is false then the
@@ -428,26 +438,29 @@ impl<'a, R> Filter<'a, R>{
     ///                     .body(()).unwrap();
     /// 
     /// // this will match as the request has an extension of type i32
-    /// let filter = request.filter().filter_custom(|req| req.extensions().get::<i32>().is_some());
-    /// assert!(filter.is_some());
+    /// let filter = request.filter_http().filter_custom(|req| req.extensions().get::<i32>().is_some());
+    /// assert!(filter.valid());
     /// ```
-    pub fn filter_custom(mut self, func : fn(&Request<R>) -> bool) -> Self {
-        self.request = self.request.filter(|r| func(r));
-        self
+    pub fn filter_custom(self, func : fn(&Request<R>) -> bool) -> Self {
+        if self.status != FilterStatus::Pass { return self.pass_through(); }
+        if func(self.request) {
+            self.pass()
+        } else {
+            self.fail(FilterStatus::FailFilterCustom)
+        }
     }
 }
 
 /* ============================================================================================ */
 /*     Test Cases                                                                               */
 /* ============================================================================================ */
-
 #[test]
 fn test_root_route() {
     use http::request::Builder;
     use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/").body(()).unwrap();
-    let filter = request.filter().filter_path("/");
-    assert!(filter.is_fufilled());
+    let filter = request.filter_http().filter_path("/");
+    assert!(filter.valid());
 }
 
 #[test]
@@ -455,8 +468,8 @@ fn test_full_route() {
     use http::request::Builder;
     use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/this/is/a/longer/path").body(()).unwrap();
-    let filter = request.filter().filter_path("/this/is/a/longer/path");
-    assert!(filter.is_fufilled());
+    let filter = request.filter_http().filter_path("/this/is/a/longer/path");
+    assert!(filter.valid());
 }
 
 #[test]
@@ -464,17 +477,8 @@ fn test_var_route() {
     use http::request::Builder;
     use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/var/static").body(()).unwrap();
-    let filter = request.filter().filter_path("/{}/static");
-    assert!(filter.is_fufilled());
-}
-
-#[test]
-fn test_mul_var_route() {
-    use http::request::Builder;
-    use crate::request::Extension;
-    let request = Builder::new().uri("https://www.rust-lang.org/var/static").body(()).unwrap();
-    let filter = request.filter().filter_path("/{val|var|temp}/static");
-    assert!(filter.is_fufilled());
+    let filter = request.filter_http().filter_path("/{}/static");
+    assert!(filter.valid());
 }
 
 #[test]
@@ -482,8 +486,8 @@ fn test_partial_route() {
     use http::request::Builder;
     use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/this/is/different").body(()).unwrap();
-    let filter = request.filter().filter_path("/this/is");
-    assert!(!filter.is_fufilled());
+    let filter = request.filter_http().filter_path("/this/is");
+    assert!(!filter.valid());
 }
 
 #[test]
@@ -491,8 +495,8 @@ fn test_pattern_route() {
     use http::request::Builder;
     use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/").body(()).unwrap();
-    let filter = request.filter().filter_path("this/is/longer");
-    assert!(!filter.is_fufilled());
+    let filter = request.filter_http().filter_path("this/is/longer");
+    assert!(!filter.valid());
 }
 
 #[test]
@@ -500,8 +504,8 @@ fn test_path_route() {
     use http::request::Builder;
     use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/this/is/longer").body(()).unwrap();
-    let filter = request.filter().filter_path("/");
-    assert!(!filter.is_fufilled());
+    let filter = request.filter_http().filter_path("/");
+    assert!(!filter.valid());
 }
 
 #[test]
@@ -509,16 +513,16 @@ fn test_path_prefix() {
     use http::request::Builder;
     use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/this/is/longer").body(()).unwrap();
-    let filter = request.filter().filter_path("/*");
-    assert!(filter.is_fufilled());
-    let filter = request.filter().filter_path("/this/is/*");
-    assert!(filter.is_fufilled());
-    let filter = request.filter().filter_path("/{}/*");
-    assert!(filter.is_fufilled());
-    let filter = request.filter().filter_path("/this/is/longer/than/the/original/*");
-    assert!(!filter.is_fufilled());
-    let filter = request.filter().filter_path("/th/*");
-    assert!(!filter.is_fufilled());
+    let filter = request.filter_http().filter_path("/*");
+    assert!(filter.valid());
+    let filter = request.filter_http().filter_path("/this/is/*");
+    assert!(filter.valid());
+    let filter = request.filter_http().filter_path("/{}/*");
+    assert!(filter.valid());
+    let filter = request.filter_http().filter_path("/this/is/longer/than/the/original/*");
+    assert!(!filter.valid());
+    let filter = request.filter_http().filter_path("/th/*");
+    assert!(!filter.valid());
 }
 
 #[test]
@@ -526,8 +530,8 @@ fn test_different_route() {
     use http::request::Builder;
     use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/this/is/different").body(()).unwrap();
-    let filter = request.filter().filter_path("/not/even/close");
-    assert!(!filter.is_fufilled());
+    let filter = request.filter_http().filter_path("/not/even/close");
+    assert!(!filter.valid());
 }
 
 
@@ -536,68 +540,28 @@ fn test_header() {
     use http::request::Builder;
     use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/").header("key", "value").body(()).unwrap();
-    let filter = request.filter().filter_header("key", "value");
-    assert!(filter.is_fufilled());
-    let filter = request.filter().filter_header("key", "{}");
-    assert!(filter.is_fufilled());
+    let filter = request.filter_http().filter_header("key", "value");
+    assert!(filter.valid());
+    let filter = request.filter_http().filter_header("key", "!value");
+    assert!(!filter.valid());
 }
 
-#[test]
-fn test_header_full(){
-    use http::request::Builder;
-    use crate::request::Extension;
-    let request = Builder::new().uri("https://www.rust-lang.org/").header("key", "value").body(()).unwrap();
-    let filter = request.filter().filter_header("?key", "{foo|bar|baz|value}");
-    assert!(filter.is_fufilled());
-    let filter = request.filter().filter_header("?key", "{foo|bar|baz}");
-    assert!(!filter.is_fufilled());
-}
-
-#[test]
-fn test_header_multiple_val(){
-    use http::request::Builder;
-    use crate::request::Extension;
-    let request = Builder::new().uri("https://www.rust-lang.org/").header("key", "value").body(()).unwrap();
-    let filter = request.filter().filter_header("key", "{foo|bar|baz|value}");
-    assert!(filter.is_fufilled());
-    let filter = request.filter().filter_header("key", "{foo|bar|baz}");
-    assert!(!filter.is_fufilled());
-}
-
-#[test]
-fn test_header_optional_key(){
-    use http::request::Builder;
-    use crate::request::Extension;
-    let request = Builder::new().uri("https://www.rust-lang.org/").header("key", "value").body(()).unwrap();
-    let filter = request.filter().filter_header("?key2", "{}");
-    assert!(filter.is_fufilled());
-    let filter = request.filter().filter_header("key2", "value2");
-    assert!(!filter.is_fufilled());
-}
 
 #[test]
 fn test_query() {
     use http::request::Builder;
     use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/?one=two&three=four&one%2Bone=two").body(()).unwrap();
-    let filter = request.filter().filter_query("one", "two");
-    assert!(filter.is_fufilled());
-    let filter = request.filter().filter_query("three", "four");
-    assert!(filter.is_fufilled());
-    let filter = request.filter().filter_query("one", "{}");
-    assert!(filter.is_fufilled());
-    let filter = request.filter().filter_query("one", "{one|two|three}");
-    assert!(filter.is_fufilled());
-    let filter = request.filter().filter_query("one", "three");
-    assert!(!filter.is_fufilled());
-    let filter = request.filter().filter_query("?one", "three");
-    assert!(!filter.is_fufilled());
-    let filter = request.filter().filter_query("five", "six");
-    assert!(!filter.is_fufilled());
-    let filter = request.filter().filter_query("?five", "six");
-    assert!(filter.is_fufilled());
-    let filter = request.filter().filter_query("one+one", "two");
-    assert!(filter.is_fufilled());
+    let filter = request.filter_http().filter_query("one", "two");
+    assert!(filter.valid());
+    let filter = request.filter_http().filter_query("three", "four");
+    assert!(filter.valid());
+    let filter = request.filter_http().filter_query("one", "three");
+    assert!(!filter.valid());
+    let filter = request.filter_http().filter_query("five", "six");
+    assert!(!filter.valid());
+    let filter = request.filter_http().filter_query("one+one", "two");
+    assert!(filter.valid());
 }
 
 #[test]
@@ -606,24 +570,12 @@ fn test_method() {
     use http::method::Method;
     use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/").method("POST").body(()).unwrap();
-    let filter = request.filter().filter_method("POST");
-    assert!(filter.is_fufilled());
-    let filter = request.filter().filter_method(["POST"]);
-    assert!(filter.is_fufilled());
-    let filter = request.filter().filter_method([Method::POST]);
-    assert!(filter.is_fufilled());
-    let filter = request.filter().filter_method(["GET"]);
-    assert!(!filter.is_fufilled());
-}
-
-#[test]
-fn test_methods() {
-    use http::request::Builder;
-    use http::method::Method;
-    use crate::request::Extension;
-    let request = Builder::new().uri("https://www.rust-lang.org/").method("POST").body(()).unwrap();
-    let filter = request.filter().filter_method([Method::DELETE, Method::PUT, Method::POST]);
-    assert!(filter.is_fufilled());
+    let filter = request.filter_http().filter_method(Method::POST);
+    assert!(filter.valid());
+    let filter = request.filter_http().filter_method("POST");
+    assert!(filter.valid());
+    let filter = request.filter_http().filter_method(Method::GET);
+    assert!(!filter.valid());
 }
 
 #[test]
@@ -631,10 +583,10 @@ fn test_custom() {
     use http::request::Builder;
     use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/").body(()).unwrap();
-    let filter = request.filter().filter_custom(|_| true);
-    assert!(filter.is_fufilled());
-    let filter = request.filter().filter_custom(|_| false);
-    assert!(!filter.is_fufilled());
+    let filter = request.filter_http().filter_custom(|_| true);
+    assert!(filter.valid());
+    let filter = request.filter_http().filter_custom(|_| false);
+    assert!(!filter.valid());
 }
 
 #[test]
@@ -642,10 +594,10 @@ fn test_scheme() {
     use http::request::Builder;
     use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/").body(()).unwrap();
-    let filter = request.filter().filter_scheme("https");
-    assert!(filter.is_fufilled());
-    let filter = request.filter().filter_scheme("http");
-    assert!(!filter.is_fufilled());
+    let filter = request.filter_http().filter_scheme("https");
+    assert!(filter.valid());
+    let filter = request.filter_http().filter_scheme("http");
+    assert!(!filter.valid());
 }
 
 #[test]
@@ -653,8 +605,176 @@ fn test_multiple_filters(){
     use http::request::Builder;
     use crate::request::Extension;
     let request = Builder::new().uri("https://www.rust-lang.org/").method("POST").body(()).unwrap();
-    let filter = request.filter().filter_scheme("https").filter_method("POST");
-    assert!(filter.is_fufilled());
-    let filter = request.filter().filter_scheme("http").filter_method("get");
-    assert!(!filter.is_fufilled());
+    let filter = request.filter_http().filter_scheme("https").filter_method("POST");
+    assert!(filter.valid());
+    let filter = request.filter_http().filter_scheme("http").filter_method("GET");
+    assert!(!filter.valid());
+}
+ 
+#[test]
+fn test_on_fail(){
+    use http::request;
+    use bytes::Bytes;
+    use http::response;
+    use crate::request::Extension;
+    let request = request::Builder::new().uri("https://www.rust-lang.org/").body(Bytes::new()).unwrap();
+    let response = request.filter_http()
+                        .commit()
+                        .filter_custom(|_| false)
+                        .on_fail(|_req| Ok(response::Builder::new()
+                            .status(400)
+                            .body(Bytes::new())?))
+                        .handle(|_| Ok(response::Builder::new()
+                            .status(200)
+                            .body(Bytes::from("Hello World"))?));
+    let response = response.unwrap().unwrap();
+    assert!(response.status() == 400);
+}
+
+#[test]
+fn test_on_fail_first_fail(){
+    use http::request;
+    use bytes::Bytes;
+    use http::response;
+    use crate::request::Extension;
+    let request = request::Builder::new().uri("https://www.rust-lang.org/").body(Bytes::new()).unwrap();
+    let response = request.filter_http()
+                        .commit()
+                        .filter_custom(|_| false)
+                        .on_fail(|_req| Ok(response::Builder::new()
+                            .status(400)
+                            .body(Bytes::new())?))
+                        .filter_custom(|_| false)
+                        .on_fail(|_req| Ok(response::Builder::new()
+                            .status(401)
+                            .body(Bytes::new())?))
+                        .handle(|_| Ok(response::Builder::new()
+                            .status(200)
+                            .body(Bytes::from("Hello World"))?));
+    let response = response.unwrap().unwrap();
+    assert!(response.status() == 400);
+}
+
+#[test]
+fn test_on_fail_first_pass(){
+    use http::request;
+    use bytes::Bytes;
+    use http::response;
+    use crate::request::Extension;
+    let request = request::Builder::new().uri("https://www.rust-lang.org/").body(Bytes::new()).unwrap();
+    let response = request.filter_http()
+                        .commit()
+                        .filter_custom(|_| true)
+                        .on_fail(|_req| Ok(response::Builder::new()
+                            .status(400)
+                            .body(Bytes::new())?))
+                        .filter_custom(|_| false)
+                        .on_fail(|_req| Ok(response::Builder::new()
+                            .status(401)
+                            .body(Bytes::new())?))
+                        .handle(|_| Ok(response::Builder::new()
+                            .status(200)
+                            .body(Bytes::from("Hello World"))?));
+    let response = response.unwrap().unwrap();
+    assert!(response.status() == 401);
+}
+
+#[test]
+fn test_on_fail_first_pass_second_pass(){
+    use http::request;
+    use bytes::Bytes;
+    use http::response;
+    use crate::request::Extension;
+    let request = request::Builder::new().uri("https://www.rust-lang.org/").body(Bytes::new()).unwrap();
+    let response = request.filter_http()
+                        .commit()
+                        .filter_custom(|_| true)
+                        .on_fail(|_req| Ok(response::Builder::new()
+                            .status(400)
+                            .body(Bytes::new())?))
+                        .filter_custom(|_| true)
+                        .on_fail(|_req| Ok(response::Builder::new()
+                            .status(401)
+                            .body(Bytes::new())?))
+                        .handle(|_| Ok(response::Builder::new()
+                            .status(200)
+                            .body(Bytes::from("Hello World"))?));
+    let response = response.unwrap().unwrap();
+    assert!(response.status() == 200);
+}
+
+#[test]
+fn test_on_fail_first_fail_second_pass(){
+    use http::request;
+    use bytes::Bytes;
+    use http::response;
+    use crate::request::Extension;
+    let request = request::Builder::new().uri("https://www.rust-lang.org/").body(Bytes::new()).unwrap();
+    let response = request.filter_http()
+                        .commit()
+                        .filter_custom(|_| false)
+                        .on_fail(|_req| Ok(response::Builder::new()
+                            .status(400)
+                            .body(Bytes::new())?))
+                        .filter_custom(|_| true)
+                        .on_fail(|_req| Ok(response::Builder::new()
+                            .status(401)
+                            .body(Bytes::new())?))
+                        .handle(|_| Ok(response::Builder::new()
+                            .status(200)
+                            .body(Bytes::from("Hello World"))?));
+    let response = response.unwrap().unwrap();
+    assert!(response.status() == 400);
+}
+
+#[test]
+fn test_handler(){
+    use http::request;
+    use bytes::Bytes;
+    use http::response;
+    use crate::request::Extension;
+    let request = request::Builder::new().uri("https://www.rust-lang.org/").body(Bytes::new()).unwrap();
+    let response = request.filter_http()
+                        .handle(|_| Ok(response::Builder::new()
+                            .status(200)
+                            .body(Bytes::from("Hello World"))?));
+    let response = response.unwrap().unwrap();
+    assert!(response.status() == 200);
+    assert!(*response.body() == Bytes::from("Hello World"));
+}
+
+#[test]
+fn test_default_handler(){
+    use http::request;
+    use bytes::Bytes;
+    use http::response;
+    use crate::request::Extension;
+    let request = request::Builder::new().uri("https://www.rust-lang.org/").method(Method::GET).body(Bytes::new()).unwrap();
+    let response = request.filter_http()
+                        .filter_path("/")
+                        .commit()
+                        .filter_method(Method::POST)
+                        .handle(|_| Ok(response::Builder::new()
+                            .status(200)
+                            .body(Bytes::from("Hello World"))?));
+    let response = response.unwrap().unwrap();
+    assert!(response.status() == 405);
+    assert!(*response.body() == Bytes::new());
+}
+
+#[test]
+fn test_failed_test(){
+    use http::request;
+    use bytes::Bytes;
+    use http::response;
+    use crate::request::Extension;
+    let request = request::Builder::new().uri("https://www.rust-lang.org/").method(Method::GET).body(Bytes::new()).unwrap();
+    let response = request.filter_http()
+                        .filter_path("/path")
+                        .commit()
+                        .filter_method(Method::POST)
+                        .handle(|_| Ok(response::Builder::new()
+                            .status(200)
+                            .body(Bytes::from("Hello World"))?));
+    assert!(response.is_none());
 }

@@ -27,12 +27,12 @@ pub trait Extension {
     /// on using the Filter trait. Whenever this filter struct is passed 
     /// through a filter function it will return Some if the inner 
     /// Response passed the filter, or None if the inner Response failed the filter. 
-    fn filter(&self) -> Option<&Self>;
+    fn filter_http(&self) -> Option<&Self>;
 }
 
 impl<R> Extension for Response<R> {
     // Simply wrap a refrence to the response in an Option
-    fn filter(&self) -> Option<&Self> {
+    fn filter_http(&self) -> Option<&Self> {
         Some(self)
     }
 }

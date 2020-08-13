@@ -75,16 +75,16 @@
 #[test]
 fn test_handler() {
 
-    let test_fn = |x| return x % 2 == 0; 
+    let test_fn = |x| x % 2 == 0; 
 
     let test = |x| {
         handle_fn!(test_fn, x);
-        return false;
+        false
     };
 
-    assert!(test(Some(0)) == true);
-    assert!(test(Some(1)) == false);
-    assert!(test(None) == false);
+    assert!(test(Some(0)));
+    assert!(!test(Some(1)));
+    assert!(!test(None));
 }
 /*
 #[test]

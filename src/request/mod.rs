@@ -24,8 +24,12 @@
 */
 mod filter;
 mod extension;
+mod filter_status;
+mod handlers;
 
 pub use self::{
     extension::{query_iter, Extension},
-    filter::Filter,
+    filter::{Filter},
+    filter_status::FilterStatus,
+    handlers::{Handlers, DefaultHandlers, HandlerResult},
 };

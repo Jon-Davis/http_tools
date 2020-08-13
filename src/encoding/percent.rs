@@ -49,7 +49,7 @@ impl<'a> PartialEq<&str> for PercentEncodedStr<'a> {
         
         loop {
             let equal = match (encoded.next(), unencoded.next()) {
-                (Some(ebyte), Some(ubyte)) if ebyte == '%' as u8 => {
+                (Some(ebyte), Some(ubyte)) if ebyte == b'%' => {
                     let first_byte = encoded.next().and_then(hex_to_byte);
                     let second_byte = encoded.next().and_then(hex_to_byte);
                     match (first_byte, second_byte) {
