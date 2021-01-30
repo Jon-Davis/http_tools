@@ -46,35 +46,48 @@ request.filter_http()
 Using an async handler, http tools can call async functions when the filter passes all of it's checks. 
 Multiple filters can be used on a single Request, routing the function to the first successful filter.
  ```
-# use http::request::Builder;
-# use futures::executor::block_on; 
-use http::{request, response};
-use http_tools::request::{RequestExtension, Filter};
+use http::{StatusCode, response::{Response, Builder}};
 use bytes::Bytes;
+use http_tools::{response::ResponseExtension, request::RequestExtension};
+use futures::future::TryFutureExt;
+# use futures::executor::block_on;
 # block_on(async {
-# let request = Builder::new()
+# let request = http::request::Builder::new()
 #                .uri("https://www.rust-lang.org/item/grapes")
-#                .method("POST")
+#                .method("GET")
 #                .body(()).unwrap();
 
+// GET /item/{:string} -> Got any {:string}
 let sv1 = request.filter_http()
-            .filter_path("/item/{}") 
+            .filter_path("/item/{}")
+            .filter_method("GET")
             .async_handle(|req| async move {
                 let input = req.get_path_var(1).unwrap();
-                let output = format!("Got any {}", input);
-                Ok(response::Builder::new().body(Bytes::from(output)).unwrap())
-            }).await;
+                let output = format!("Got any {}?", input);
+                Ok(Builder::new().body(Bytes::from(output)).unwrap())
+            });
 
-let sv2 = request.filter_http()
-            .filter_path("/hello/{}") 
-            .async_handle(|req| async move {
-                let input = req.get_path_var(1).unwrap();
-                let output = format!("Hello {}", input);
-                Ok(response::Builder::new().body(Bytes::from(output)).unwrap())
-            }).await;
+// GET /hello/{:string} -> Hello {:string}
+let sv2  = |_| {
+    request.filter_http()
+        .filter_path("/hello/{}")
+        .filter_method("GET")
+        .async_handle(|req| async move {
+            let input = req.get_path_var(1).unwrap();
+            let output = format!("Hello {}!", input);
+            Ok(Builder::new().body(Bytes::from(output)).unwrap())
+        })
+    };
 
-// handlers return Some if the filter produced an output
-sv1.or(sv2);
+// Lazy evaluate paths, set default 404 and 500 errors
+let response = sv1.or_else(sv2).await
+    // If neither of the Filters passed, return a 404 NOT_FOUND response
+    .unwrap_or_else(|_| Ok(Response::<Bytes>::from_status(StatusCode::NOT_FOUND)))
+    // If the service returned an Error, create a Response from the Errors Display
+    .unwrap_or_else(Response::<Bytes>::from_error);
+
+// Got any grapes?
+assert!(response.body() == "Got any grapes?");
 # });
 ```
 # Other tools

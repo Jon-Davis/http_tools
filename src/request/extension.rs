@@ -56,7 +56,7 @@ impl<'a, R> RequestExtension<'a, R> for Request<R> {
 /// 
 /// // use the http_tools function to create an iterator
 /// for (key, value) in query_iter(&request){
-///     println!("{} {}", key.inner(), value.inner())
+///     println!("{:?} {:?}", key, value)
 /// }
 /// 
 /// // will print out 

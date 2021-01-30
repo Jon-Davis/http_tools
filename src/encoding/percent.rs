@@ -20,15 +20,31 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+/// PercentEncodedStr is a wrapper around a `&str` that is percent encoded, such as a URI.
+/// The main use of a PercentEncodedStr is comparing it to decoded `&str`. The wrapper doesn't
+/// decode the string, it just enables comparisons with &str.
+/// ```
+/// use http_tools::encoding::PercentEncodedStr;
+///
+/// assert!(PercentEncodedStr::new("hello+world") == "hello world");
+/// assert!(PercentEncodedStr::new("hello%20world") == "hello world");
+/// assert!(PercentEncodedStr::new("%3c!html%3e") == "<!html>");
+/// // If a PercentEncodedStr matches a &str verbatim, it will also return being equal to it 
+/// assert!(PercentEncodedStr::new("%3c!html%3e") == "%3c!html%3e");
+/// ```
+#[derive(Debug)]
 pub struct PercentEncodedStr<'a>(&'a str);
 
 impl<'a> PercentEncodedStr<'a> {
+    /// Creates a new PercentEncodedStr from a &str that is percent encoded
+    /// # Example
+    /// ```
+    /// use http_tools::encoding::PercentEncodedStr;
+    ///
+    /// let percent_encoded_str = PercentEncodedStr::new("hello+world");
+    /// ```
     pub fn new(s : &'a str) -> Self {
         PercentEncodedStr(s)
-    }
-
-    pub fn inner(&self) -> &str {
-        self.0
     }
 }
 
@@ -69,4 +85,13 @@ impl<'a> PartialEq<&str> for PercentEncodedStr<'a> {
         }
 
     }
+}
+
+#[test]
+fn test_percent_encoded_str(){
+    assert!(PercentEncodedStr("hello+world") == "hello world");
+    assert!(PercentEncodedStr("hello%20world") == "hello world");
+    assert!(PercentEncodedStr("%3c!html%3e") == "<!html>");
+    assert!(PercentEncodedStr("%2c.%2f%3b%27%5b%5d%3c%3e%3f%3a%22%7b%7d!%40%23%24%25%5e%26*()_%2b-%3d") == ",./;'[]<>?:\"{}!@#$%^&*()_+-=");
+    assert!(PercentEncodedStr::new("%3c!html%3e") == "%3c!html%3e");
 }

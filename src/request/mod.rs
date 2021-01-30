@@ -20,7 +20,10 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 /*! 
- Provides functions and implements traits on the http::request::Request type.
+ Provides functions and implements traits on the http::request::Request type. The primary parts
+ of this module are the `RequestExtension` which provide additional functionality on the
+ `http::Request` type, as well as the `Filter` struct, which allows for the filtering and handling
+ of http Requests.
 */
 mod filter;
 mod extension;
@@ -28,6 +31,6 @@ mod filter_status;
 
 pub use self::{
     extension::{query_iter, RequestExtension},
-    filter::{Filter},
+    filter::{Filter, HandlerResult},
     filter_status::FilterError,
 };

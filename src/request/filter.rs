@@ -21,23 +21,25 @@
 // SOFTWARE.
 /* ============================================================================================ */
 /*     Document Structure                                                                       */
-/*          Filter Trait                                                                        */
-/*          impl Filter for Option<Request>                                                     */
+/*          Filter Struct                                                                       */
+/*          impl Filter                                                                         */
 /*          Test Cases                                                                          */
 /* ============================================================================================ */
 use bytes::Bytes;
-use http::{Response, StatusCode, request::Request};
+use http::{Response, request::Request};
 use http::method::Method;
 use http::header::HeaderValue;
-use std::error::Error;
 use std::future::Future;
-use crate::{request::{query_iter, FilterError}, response::{self, ResponseExtension}};
-pub type HandlerResult = Result<Response<Bytes>, Box<dyn Error>>;
+use anyhow::Result;
+use crate::{request::{query_iter, FilterError}};
 
+/// Convenience type, returned by several Filter Methods such as `handle()`, `async_handle()`, `on_fail()`, and `set_error_handler()`.
+pub type HandlerResult = Result<Response<Bytes>>;
 
+/// Wraps a `&http::Request` and allows for the filtering of requests, as well as calling handler functions to process the Request.
 pub struct Filter<'a, R> {
     request: &'a Request<R>,
-    response : fn(&Request<R>, FilterError) -> HandlerResult,
+    error_handler : Option<fn(&Request<R>, FilterError) -> HandlerResult>,
     pass_throughs : u8,
     committed: bool,
     error : Option<FilterError>,
@@ -50,27 +52,7 @@ impl<'a, R> Filter<'a, R>{
     pub(crate) fn new(request : &'a Request<R>) -> Filter<'a, R> {
         Filter{
             request,
-            // default error response handler
-            response: |request, status| {
-                use http::response::Builder;
-                match status {
-                    FilterError::FailFilterPath => Ok(Builder::new()
-                            .status(404)
-                            .version(request.version())
-                            .header("Content-Length", 0)
-                            .body(Bytes::new())?),
-                    FilterError::FailFilterMethod => Ok(Builder::new()
-                            .status(405)
-                            .version(request.version())
-                            .header("Content-Length", 0)
-                            .body(Bytes::new())?),
-                    _ => Ok(Builder::new()
-                            .status(400)
-                            .version(request.version())
-                            .header("Content-Length", 0)
-                            .body(Bytes::new())?),
-                }
-            },
+            error_handler: None,
             error: None,
             pass_throughs: 0,
             committed: false,
@@ -83,7 +65,7 @@ impl<'a, R> Filter<'a, R>{
         self
     }
 
-    /// Shorthand function to pass a function, wiping the previous handler
+    /// Shorthand function to pass a function
     fn pass(self) -> Self {
         self
     }
@@ -94,27 +76,17 @@ impl<'a, R> Filter<'a, R>{
         self
     }
 
-    pub fn on_fail(mut self, handler: fn(&Request<R>, FilterError) -> HandlerResult) -> Self {
-        if self.pass_throughs == 0 && self.error.is_some(){
-            self.response = handler;
-            self.committed = true;
-            self.pass_through()
-        } else {
-            self
-        }
-    }
-
     /// Handle consumes the filter, it's behavior is dependent on the state of the filter
     ///
     /// * If the filter is passing, then the closure passed as an argument will be run. As a result
-    /// `handle()` will return Some(Result<Response>).
-    /// * If the filter is failing, but a response handler was set through an `on_fail()` method while the
-    /// filter was passing, then that function will be called to generate a response. As a result `handle()`
-    /// will return Some(Result<Response>).
-    /// * If the filter is failing, but the `commit()` function was called while the filter was passing, and
-    /// there is no response handler set by the `on_fail` function. Then the default handler for the filter
-    /// will be run. As a result `handle()` will return Some(Result<Response>).
-    /// * Otherwise the filter failed before it was committed. As a result `handle()` will return None.
+    /// `handle()` will return Ok(HandlerResult).
+    /// * If a committed filter is failing, but a response handler was set through the `on_fail()` or `set_error_handler()`
+    // methods, then the error handler function will be called to generate a response. As a result `handle()`
+    /// will return `Ok(HandlerResult)`.
+    /// * f a committed filter is failing, but no response handler was set through the `on_fail()` or `set_error_handler()`
+    // methods, then the `default_error_handler` function will be called to generate a response. As a result `handle()`
+    /// will return `Ok(HandlerResult)`.
+    /// * Otherwise the filter failed before it was committed. As a result `handle()` will return Err.
     ///
     /// # Example
     /// ```
@@ -143,37 +115,27 @@ impl<'a, R> Filter<'a, R>{
     ///                     .handle(|_| Ok(Default::default()));
     /// // The default handler returns a 405 Method not found when a filter_method() fails
     /// assert!(response.unwrap().unwrap().status() == 405);
-    ///
-    /// // This failing filter is looking for a path of `/failed/path`
-    /// let response = request.filter_http()
-    ///                     .filter_path("/failed/path")
-    ///                     .on_fail(|_, _| Ok(response::Builder::new()
-    ///                         .status(123)
-    ///                         .body(Bytes::new())?))
-    ///                     .filter_method(Method::POST)
-    ///                     .handle(|_| Ok(Default::default()));
-    /// // Since the previous filter failed, the on_fail response is run by handle
-    /// assert!(response.unwrap().unwrap().status() == 123);
     /// ```
     pub fn handle(self, handler: fn(&'a Request<R>) -> HandlerResult) -> Result<HandlerResult, FilterError> {
-        match (self.committed, self.error) {
-            (_, None) => Ok(handler(self.request)),
-            (true, Some(err)) => Ok((self.response)(self.request, err)),
-            (false, Some(err))=> Err(err),
+        match (self.error_handler, self.committed, self.error) {
+            (_, _, None) => Ok(handler(self.request)),
+            (Some(response), true, Some(err)) => Ok((response)(self.request, err)),
+            (None, true, Some(err)) => Ok(Self::default_error_handler(self.request, err)),
+            (_, false, Some(err))=> Err(err),
         }
     }
 
     /// An Async Handle that consumes the filter, it's behavior is dependent on the state of the filter
     ///
     /// * If the filter is passing, then the closure passed as an argument will be run. As a result
-    /// `handle()` will return Some(Result<Response>).
-    /// * If the filter is failing, but a response handler was set through an `on_fail()` method while the
-    /// filter was passing, then that function will be called to generate a response. As a result `handle()`
-    /// will return Some(Result<Response>).
-    /// * If the filter is failing, but the `commit()` function was called while the filter was passing, and
-    /// there is no response handler set by the `on_fail` function. Then the default handler for the filter
-    /// will be run. As a result `handle()` will return Some(Result<Response>).
-    /// * Otherwise the filter failed before it was committed. As a result `handle()` will return None.
+    /// `async_handle()` will return `impl Future<Output=Ok(HandlerResult)>`.
+    /// * If a committed filter is failing, but a response handler was set through the `on_fail()` or `set_error_handler()`
+    // methods, then the error handler function will be called to generate a response. As a result `async_handle()`
+    /// will return `impl Future<Output=Ok(HandlerResult)>`.
+    /// * f a committed filter is failing, but no response handler was set through the `on_fail()` or `set_error_handler()`
+    // methods, then the `default_error_handler` function will be called to generate a response. As a result `async_handle()`
+    /// will return `impl Future<Output=Ok(HandlerResult)>``.
+    /// * Otherwise the filter failed before it was committed. As a result `handle()` will return Err.
     ///
     /// # Example
     /// ```
@@ -208,27 +170,15 @@ impl<'a, R> Filter<'a, R>{
     ///                     }).await;    
     ///     // The default handler returns a 405 Method not found when a filter_method() fails
     ///     assert!(response.unwrap().unwrap().status() == 405);
-    ///
-    ///     // This failing filter is looking for a path of `/failed/path`
-    ///     let response = request.filter_http()
-    ///                     .filter_path("/failed/path")
-    ///                     .on_fail(|_, _| Ok(response::Builder::new()
-    ///                         .status(123)
-    ///                         .body(Bytes::new())?))
-    ///                     .filter_method(Method::POST)
-    ///                     .async_handle(|_| async { 
-    ///                         Ok(Default::default())
-    ///                     }).await;    
-    ///     // Since the previous filter failed, the on_fail response is run by handle
-    ///     assert!(response.unwrap().unwrap().status() == 123);
     /// });
     /// ```
     pub async fn async_handle<F>(self, handler: fn(&'a Request<R>) -> F) -> Result<HandlerResult, FilterError> 
     where F : Future<Output=HandlerResult> {
-        match (self.committed, self.error) {
-            (_, None) => Ok(handler(self.request).await),
-            (true, Some(err)) => Ok((self.response)(self.request, err)),
-            (false, Some(err))=> Err(err),
+        match (self.error_handler, self.committed, self.error) {
+            (_, _, None) => Ok(handler(self.request).await),
+            (Some(response), true, Some(err)) => Ok((response)(self.request, err)),
+            (None, true, Some(err)) => Ok(Self::default_error_handler(self.request, err)),
+            (_, false, Some(err))=> Err(err),
         }
     }
 
@@ -274,6 +224,121 @@ impl<'a, R> Filter<'a, R>{
         if self.error.is_none() {
             self.committed = true;
         }
+        self
+    }
+
+    /// Provides a handler that will be run in the event that the previous filter caused a failure.
+    /// The handler passed to this function will be called when the handler() or async_handle() 
+    /// functions are called. If the previous filter caused a failure, than the on_fail() method
+    /// will commit (see commit()) to returning the passed handler, however if the previous filter
+    /// passed, or if the Filter was already failing prior to the previous filter, than the method 
+    /// will not commit.
+    /// # Example
+    /// ```
+    /// use bytes::Bytes;
+    /// use http::{request, method::Method, StatusCode, response::Response};
+    /// use http_tools::{request::RequestExtension, response::ResponseExtension};
+    ///
+    /// # let request = request::Builder::new()
+    /// #                    .uri("https://www.rust-lang.org/")
+    /// #                    .method(Method::GET)
+    /// #                    .body(Bytes::new())
+    /// #                    .unwrap();
+    /// // This failing filter is looking for a path of `/failed/path`
+    /// let response = request.filter_http()
+    ///                     .filter_path("/failed/path")
+    ///                     .on_fail(|_req, _status| Ok(Response::<Bytes>::from_status(StatusCode::IM_A_TEAPOT)))
+    ///                     .filter_method(Method::POST)
+    ///                     .handle(|_| Ok(Default::default()));
+    /// // Since the previous filter failed, the on_fail response is run by handle
+    /// assert!(response.unwrap().unwrap().status() == StatusCode::IM_A_TEAPOT);
+    /// ```
+    pub fn on_fail(mut self, handler: fn(&Request<R>, FilterError) -> HandlerResult) -> Self {
+        if self.pass_throughs == 0 && self.error.is_some(){
+            self.error_handler = Some(handler);
+            self.committed = true;
+            self.pass_through()
+        } else {
+            self
+        }
+    }
+
+    /// The default error handler, used when a committed Filter failed and needs to return a response. The default
+    /// error handler is made available to make it easier to create custom error handlers using the `.set_error_handler()`
+    /// method.
+    /// ```
+    /// use bytes::Bytes;
+    /// use http::{request, method::Method, StatusCode, response::Response};
+    /// use http_tools::{request::{RequestExtension, Filter, FilterError}, response::ResponseExtension};
+    ///
+    /// # let request = request::Builder::new()
+    /// #                    .uri("https://www.rust-lang.org/")
+    /// #                    .method(Method::GET)
+    /// #                    .body(Bytes::new())
+    /// #                    .unwrap();
+    /// // This failing filter is looking for a path of `/failed/path`
+    /// let response = request.filter_http()
+    ///                     .commit()
+    ///                     .filter_custom(|_| false)
+    ///                     .filter_method(Method::POST)
+    ///                     .set_error_handler(|req, status| match status {
+    ///                         FilterError::FailFilterCustom => Ok(Response::<Bytes>::from_status(StatusCode::IM_A_TEAPOT)),
+    ///                         _ => Filter::default_error_handler(req, status),
+    ///                     })
+    ///                     .handle(|_| Ok(Default::default()));
+    /// // Since the previous filter failed, the on_fail response is run by handle
+    /// assert!(response.unwrap().unwrap().status() == StatusCode::IM_A_TEAPOT);
+    /// ```
+    pub fn default_error_handler(req : &Request<R>, err : FilterError) -> HandlerResult {
+        use http::response::Builder;
+        match err {
+            FilterError::FailFilterPath => Ok(Builder::new()
+                    .status(404)
+                    .version(req.version())
+                    .header("Content-Length", 0)
+                    .body(Bytes::new())?),
+            FilterError::FailFilterMethod => Ok(Builder::new()
+                    .status(405)
+                    .version(req.version())
+                    .header("Content-Length", 0)
+                    .body(Bytes::new())?),
+            _ => Ok(Builder::new()
+                    .status(400)
+                    .version(req.version())
+                    .header("Content-Length", 0)
+                    .body(Bytes::new())?),
+        }
+    }
+
+    /// Filters provide a basic error handler that will generate a http::Response given the state
+    /// of a committed filter. For example the default Error Handler will generate a http::Response with a status
+    /// code of 405 if the filter failed due to a .filter_method() call. set_error_handler() will override
+    /// the default error handlers.
+    /// ```
+    /// use bytes::Bytes;
+    /// use http::{request, method::Method, StatusCode, response::Response};
+    /// use http_tools::{request::{RequestExtension, Filter, FilterError}, response::ResponseExtension};
+    ///
+    /// # let request = request::Builder::new()
+    /// #                    .uri("https://www.rust-lang.org/")
+    /// #                    .method(Method::GET)
+    /// #                    .body(Bytes::new())
+    /// #                    .unwrap();
+    /// // This failing filter is looking for a path of `/failed/path`
+    /// let response = request.filter_http()
+    ///                     .commit()
+    ///                     .filter_custom(|_| false)
+    ///                     .filter_method(Method::POST)
+    ///                     .set_error_handler(|req, status| match status {
+    ///                         FilterError::FailFilterCustom => Ok(Response::<Bytes>::from_status(StatusCode::IM_A_TEAPOT)),
+    ///                         _ => Filter::default_error_handler(req, status),
+    ///                     })
+    ///                     .handle(|_| Ok(Default::default()));
+    /// // Since the previous filter failed, the on_fail response is run by handle
+    /// assert!(response.unwrap().unwrap().status() == StatusCode::IM_A_TEAPOT);
+    /// ```
+    pub fn set_error_handler(mut self, handler: fn(&Request<R>, FilterError) -> HandlerResult) -> Self {
+        self.error_handler = self.error_handler.or(Some(handler));
         self
     }
 
@@ -947,9 +1012,68 @@ fn test_async_handler_returns(){
         let response = sv1
             .or_else(sv2).await
             .unwrap_or_else(|_| Ok(Response::<Bytes>::from_status(StatusCode::NOT_FOUND)))
-            .unwrap_or_else(|err| Response::<Bytes>::from_boxed_error(err, StatusCode::INTERNAL_SERVER_ERROR));
-
+            .unwrap_or_else(Response::<Bytes>::from_error);
         // Got any grapes?
         assert!(response.body() == "Got any grapes");
     });
+}
+
+#[test]
+fn test_error_to_response(){
+    use http::{request, StatusCode};
+    use bytes::Bytes;
+    use http::response::{Response};
+    use crate::request::RequestExtension;
+    use crate::response::ResponseExtension;
+    use futures::executor::block_on;
+    use anyhow::Context;
+    let request = request::Builder::new().uri("https://www.rust-lang.org/")
+        .method(Method::GET)
+        .body(Bytes::new())
+        .unwrap();
+
+    block_on(async {
+        // GET /item/{:string} -> Got any {:string}
+        let sv1 = request.filter_http()
+                    .filter_path("/") 
+                    .async_handle(|_| async move {
+                        u8::from_str_radix("abc", 10)
+                            .context(StatusCode::IM_A_TEAPOT)
+                            .context("Short and spout!")?;
+                        unreachable!();
+                    });
+        
+        // Lazy evaluate paths, set default 404 and 500 errors
+        let response = sv1.await
+            .unwrap_or_else(|_| Ok(Response::<Bytes>::from_status(StatusCode::NOT_FOUND)))
+            .unwrap_or_else(Response::<Bytes>::from_error);
+
+        assert!(response.status() == StatusCode::IM_A_TEAPOT);
+        assert!(response.body() == "Short and spout!");
+    });
+}
+
+#[test]
+fn test_custom_handlers(){
+    use bytes::Bytes;
+    use http::{request, method::Method, StatusCode, response::Response};
+    use crate::{request::{RequestExtension, Filter, FilterError}, response::ResponseExtension};
+
+    let request = request::Builder::new()
+                        .uri("https://www.rust-lang.org/")
+                        .method(Method::GET)
+                        .body(Bytes::new())
+                        .unwrap();
+    // This failing filter is looking for a path of `/failed/path`
+    let response = request.filter_http()
+                        .commit()
+                        .filter_custom(|_| false)
+                        .filter_method(Method::POST)
+                        .set_error_handler(|req, status| match status {
+                            FilterError::FailFilterCustom => Ok(Response::<Bytes>::from_status(StatusCode::IM_A_TEAPOT)),
+                            _ => Filter::default_error_handler(req, status),
+                        })
+                        .handle(|_| Ok(Default::default()));
+    // Since the previous filter failed, the on_fail response is run by handle
+    assert!(response.unwrap().unwrap().status() == StatusCode::IM_A_TEAPOT);
 }
