@@ -29,6 +29,20 @@ pub trait RequestExtension<'a, R> {
     /// through a filter function it will return Some if the inner 
     /// Request passed the filter, or None if the inner Request failed the filter. 
     fn filter_http(&'a self) -> Filter<'a, R>;
+    /// Returns the value at a given index in a path
+    /// # Example
+    /// ```
+    /// use http::request::Builder;
+    /// use http_tools::request::RequestExtension;
+    /// // given an  http request
+    /// let request = Builder::new()
+    ///                 .uri("https://www.rust-lang.org/one/two/three")
+    ///                 .body(()).unwrap();
+    ///
+    /// assert!(request.get_path_var(0).unwrap() == "one");
+    /// assert!(request.get_path_var(1).unwrap() == "two");
+    /// assert!(request.get_path_var(2).unwrap() == "three");
+    /// ```
     fn get_path_var(&self, index : usize) -> Option<&str>;
 }
 
