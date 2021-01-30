@@ -27,13 +27,16 @@ impl<'a> PercentEncodedStr<'a> {
         PercentEncodedStr(s)
     }
 
+    pub fn inner(&self) -> &str {
+        self.0
+    }
 }
 
 fn hex_to_byte(hex : u8) -> Option<u8> {
     match hex {
-        hex if hex >= 48 && hex <= 57 => Some(hex - 48),
-        hex if hex >= 65 && hex <= 70 => Some(hex - 55),
-        hex if hex >= 97 && hex <= 102 => Some(hex - 87),
+        hex if (48..=57).contains(&hex) => Some(hex - 48),
+        hex if (65..=70).contains(&hex) => Some(hex - 55),
+        hex if (97..=102).contains(&hex) => Some(hex - 87),
         _ => None,
     }
 }

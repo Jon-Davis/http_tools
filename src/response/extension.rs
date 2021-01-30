@@ -19,18 +19,36 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
-use http::response::Response;
+use std::error::Error;
+use bytes::Bytes;
+use http::{StatusCode, response::Response};
 
 /// The Extension trait provides additional methods to the Http Response type
-pub trait Extension {
+pub trait ResponseExtension {
     /// Creates an Option<&Response> that can be filtered
     /// on using the Filter trait. Whenever this filter struct is passed 
     /// through a filter function it will return Some if the inner 
     /// Response passed the filter, or None if the inner Response failed the filter. 
     fn filter_http(&self) -> Option<&Self>;
+
+    fn from_error<E : Error>(err : &E, status: StatusCode) -> Response<Bytes> {
+        Response::builder().status(status).body(Bytes::from(format!("{}", err)))
+            .unwrap_or_else(|_| Self::from_status(status))
+    }
+
+    fn from_boxed_error(err : Box<dyn Error>, status: StatusCode) -> Response<Bytes> {
+        Response::builder().status(status).body(Bytes::from(format!("{}", err)))
+            .unwrap_or_else(|_| Self::from_status(status))
+    }
+
+    fn from_status(status: StatusCode) -> Response<Bytes> {
+        let mut response = Response::default();
+        *response.status_mut() = status;
+        response
+    }
 }
 
-impl<R> Extension for Response<R> {
+impl<R> ResponseExtension for Response<R> {
     // Simply wrap a refrence to the response in an Option
     fn filter_http(&self) -> Option<&Self> {
         Some(self)

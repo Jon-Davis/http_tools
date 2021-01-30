@@ -46,7 +46,7 @@ const WILDCARD : &str = "{}";
 /// ```
 /// # use http::response::Builder;
 /// # use http::status::StatusCode;
-/// use http_tools::response::{Filter, Extension};
+/// use http_tools::response::{Filter, ResponseExtension};
 /// # let response = Builder::new()
 /// #                .status(200)
 /// #                .header("content-type", "application/x-www-form-urlencoded")
@@ -76,7 +76,7 @@ pub trait Filter<'a, R> {
     /// # Example
     /// ```
     /// use http::response::Builder;
-    /// use http_tools::response::{Extension, Filter};
+    /// use http_tools::response::{ResponseExtension, Filter};
     /// 
     /// // Response Builder found in http crate
     /// let response = Builder::new()
@@ -98,7 +98,7 @@ pub trait Filter<'a, R> {
     /// # Example
     /// ```
     /// use http::response::Builder;
-    /// use http_tools::response::{Extension, Filter};
+    /// use http_tools::response::{ResponseExtension, Filter};
     /// // Response Builder found in http crate
     /// let response = Builder::new()
     ///                     .extension(-1i32)
@@ -117,7 +117,7 @@ pub trait Filter<'a, R> {
     /// ```
     /// use http::response::Builder;
     /// use http::status::StatusCode;
-    /// use http_tools::response::{Extension, Filter};
+    /// use http_tools::response::{ResponseExtension, Filter};
     /// // Response Builder found in http crate
     /// let response = Builder::new()
     ///                     .status(200)
@@ -207,7 +207,7 @@ impl<'a, R> Filter<'a, R> for Option<&Response<R>>{
 #[test]
 fn test_header() {
     use http::response::Builder;
-    use crate::response::Extension;
+    use crate::response::ResponseExtension;
     use http::header::HeaderValue;
     let mut header = HeaderValue::from_str("value").unwrap();
     header.set_sensitive(true);
@@ -230,7 +230,7 @@ fn test_header() {
 #[test]
 fn test_custom() {
     use http::response::Builder;
-    use crate::response::Extension;
+    use crate::response::ResponseExtension;
     let response = Builder::new().body(()).unwrap();
     let filter = response.filter_http().filter_custom(|_| true);
     assert!(filter.is_some());
@@ -241,7 +241,7 @@ fn test_custom() {
 #[test]
 fn test_status() {
     use http::response::Builder;
-    use crate::response::Extension;
+    use crate::response::ResponseExtension;
     let response = Builder::new().status(StatusCode::OK).body(()).unwrap();
     let filter = response.filter_http().filter_status(StatusCode::OK);
     assert!(filter.is_some());

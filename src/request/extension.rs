@@ -20,29 +20,25 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 use http::request::Request;
-use crate::request::{Filter, DefaultHandlers, Handlers};
+use crate::request::Filter;
 use crate::encoding::PercentEncodedStr;
 /// The Extension trait provides additional methods to the Http Request type
-pub trait Extension<'a, R> {
+pub trait RequestExtension<'a, R> {
     /// Creates an Option<&Request> that can be filtered
     /// on using the Filter trait. Whenever this filter struct is passed 
     /// through a filter function it will return Some if the inner 
     /// Request passed the filter, or None if the inner Request failed the filter. 
-    fn filter_http(&'a self) -> Filter<'a, R, DefaultHandlers>;
-    /// Creates an Option<&Request> that can be filtered
-    /// on using the Filter trait. Whenever this filter struct is passed 
-    /// through a filter function it will return Some if the inner 
-    /// Request passed the filter, or None if the inner Request failed the filter. 
-    fn filter_http_with_handlers<H : Handlers<R>>(&'a self) -> Filter<'a, R, H>;
+    fn filter_http(&'a self) -> Filter<'a, R>;
+    fn get_path_var(&self, index : usize) -> Option<&str>;
 }
 
-impl<'a, R> Extension<'a, R> for Request<R> {
+impl<'a, R> RequestExtension<'a, R> for Request<R> {
     // Simply wrap a reference to the request in an Option
-    fn filter_http(&'a self) -> Filter<'a, R, DefaultHandlers> {
+    fn filter_http(&'a self) -> Filter<'a, R> {
         Filter::new(self)
     }
-    fn filter_http_with_handlers<H : Handlers<R>>(&'a self) -> Filter<'a, R, H> {
-        Filter::new(self)
+    fn get_path_var(&self, index : usize) -> Option<&str> {
+        self.uri().path().split('/').nth(index+1)
     }
 }
 
@@ -60,14 +56,14 @@ impl<'a, R> Extension<'a, R> for Request<R> {
 /// 
 /// // use the http_tools function to create an iterator
 /// for (key, value) in query_iter(&request){
-///     println!("{} {}", key, value)
+///     println!("{} {}", key.inner(), value.inner())
 /// }
 /// 
 /// // will print out 
 /// // one two
 /// // three four
 /// ```
-pub fn query_iter<'a, R>(request : &'a Request<R>) -> impl 'a + Iterator<Item=(PercentEncodedStr<'a>, PercentEncodedStr<'a>)> {
+pub fn query_iter<R>(request : &Request<R>) -> impl Iterator<Item=(PercentEncodedStr<'_>, PercentEncodedStr<'_>)> {
     request.uri().query()
         .unwrap_or("")
         .split('&')

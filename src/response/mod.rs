@@ -25,6 +25,6 @@
 mod filter;
 mod extension;
 pub use self::{
-    extension::Extension,
+    extension::ResponseExtension,
     filter::Filter,
 };

@@ -2,7 +2,7 @@
 
 
 #[derive(PartialEq, Debug, Clone, Copy)]
-pub enum FilterStatus {
+pub enum FilterError {
     Pass,
     FailFilterHeader,
     FailFilterQuery,
