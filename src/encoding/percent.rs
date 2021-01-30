@@ -21,6 +21,7 @@
 // SOFTWARE.
 
 /// PercentEncodedStr is a wrapper around a `&str` that is percent encoded, such as a URI.
+/// 
 /// The main use of a PercentEncodedStr is comparing it to decoded `&str`. The wrapper doesn't
 /// decode the string, it just enables comparisons with &str.
 /// ```

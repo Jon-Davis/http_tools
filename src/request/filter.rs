@@ -1024,7 +1024,7 @@ fn test_error_to_response(){
     use bytes::Bytes;
     use http::response::{Response};
     use crate::request::RequestExtension;
-    use crate::response::ResponseExtension;
+    use crate::response::{ResponseExtension, ResponseBody};
     use futures::executor::block_on;
     use anyhow::Context;
     let request = request::Builder::new().uri("https://www.rust-lang.org/")
@@ -1039,7 +1039,7 @@ fn test_error_to_response(){
                     .async_handle(|_| async move {
                         u8::from_str_radix("abc", 10)
                             .context(StatusCode::IM_A_TEAPOT)
-                            .context("Short and spout!")?;
+                            .context(ResponseBody::new("Short and spout!"))?;
                         unreachable!();
                     });
         

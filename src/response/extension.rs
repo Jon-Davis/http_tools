@@ -23,14 +23,10 @@ use bytes::Bytes;
 use http::{StatusCode, response::Response};
 use  anyhow::Error;
 
+use super::ResponseBody;
+
 /// The Extension trait provides additional methods to the Http Response type
 pub trait ResponseExtension {
-    /// Creates an Option<&Response> that can be filtered
-    /// on using the Filter trait. Whenever this filter struct is passed 
-    /// through a filter function it will return Some if the inner 
-    /// Response passed the filter, or None if the inner Response failed the filter. 
-    fn filter_http(&self) -> Option<&Self>;
-
     /// Converts an error caused by a handler function into a response. Handlers use
     /// the anyhow crate for returning errors, anyhow allows the attachment of contexts
     /// to errors. `from_error(err)` will pull the StatusCode and &str contexts and use those to create
@@ -39,7 +35,7 @@ pub trait ResponseExtension {
     /// ```
     /// use http::{request, StatusCode, response::Response, Method};
     /// use bytes::Bytes;
-    /// use http_tools::{request::RequestExtension, response::ResponseExtension};
+    /// use http_tools::{request::RequestExtension, response::{ResponseExtension, ResponseBody}};
     /// use anyhow::Context;
     /// # use futures::executor::block_on;
     /// # let request = request::Builder::new().uri("https://www.rust-lang.org/")
@@ -54,7 +50,7 @@ pub trait ResponseExtension {
     ///         // An unrecoverable error occurs while handling a Request
     ///         u8::from_str_radix("abc", 10)
     ///             .context(StatusCode::IM_A_TEAPOT) // Set Status of Response
-    ///             .context("Short and spout!")?; // Set body of Response
+    ///             .context(ResponseBody::new("Short and spout!"))?; // Set body of Response
     ///         unreachable!();
     ///     });
     ///    
@@ -66,16 +62,22 @@ pub trait ResponseExtension {
     /// assert!(response.body() == "Short and spout!");
     /// # });
     /// ```
+    fn from_error(err : Error) -> Response<Bytes>;
+
+    fn from_status(status: StatusCode) -> Response<Bytes>;
+}
+
+impl<R> ResponseExtension for Response<R> {
     fn from_error(err : Error) -> Response<Bytes> {
         let status = match err.downcast_ref::<StatusCode>(){
             Some(s) => s,
             _ => &StatusCode::INTERNAL_SERVER_ERROR,
         };
-        let body = match err.downcast_ref::<&str>(){
-            Some(s) => s,
-            _ => status.canonical_reason().unwrap_or(""),
+        let body = match err.downcast_ref::<ResponseBody>(){
+            Some(s) => s.0.clone(),
+            _ => Bytes::from(status.canonical_reason().unwrap_or("")),
         };
-        Response::builder().status(status).body(Bytes::from(body))
+        Response::builder().status(status).body(body)
             .unwrap_or_else(|_| Self::from_status(*status))
     }
 
@@ -83,12 +85,5 @@ pub trait ResponseExtension {
         let mut response = Response::default();
         *response.status_mut() = status;
         response
-    }
-}
-
-impl<R> ResponseExtension for Response<R> {
-    // Simply wrap a refrence to the response in an Option
-    fn filter_http(&self) -> Option<&Self> {
-        Some(self)
     }
 }

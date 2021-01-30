@@ -22,9 +22,10 @@
 /*! 
  Provides functions and implements traits on the http::request::Response type.
 */
-mod filter;
 mod extension;
+mod body;
+
 pub use self::{
     extension::ResponseExtension,
-    filter::Filter,
+    body::ResponseBody,
 };
