@@ -116,7 +116,8 @@ impl<'a, R> Filter<'a, R>{
     /// // The default handler returns a 405 Method not found when a filter_method() fails
     /// assert!(response.unwrap().unwrap().status() == 405);
     /// ```
-    pub fn handle(self, handler: fn(&'a Request<R>) -> HandlerResult) -> Result<HandlerResult, FilterError> {
+    pub fn handle<F>(self, handler: F) -> Result<HandlerResult, FilterError>
+    where F: Fn(&'a Request<R>) -> HandlerResult {
         match (self.error_handler, self.committed, self.error) {
             (_, _, None) => Ok(handler(self.request)),
             (Some(response), true, Some(err)) => Ok((response)(self.request, err)),
@@ -172,8 +173,9 @@ impl<'a, R> Filter<'a, R>{
     ///     assert!(response.unwrap().unwrap().status() == 405);
     /// });
     /// ```
-    pub async fn async_handle<F>(self, handler: fn(&'a Request<R>) -> F) -> Result<HandlerResult, FilterError> 
-    where F : Future<Output=HandlerResult> {
+    pub async fn async_handle<F, O>(self, handler: F) -> Result<HandlerResult, FilterError> 
+        where O : Future<Output=HandlerResult>,
+            F : Fn(&'a Request<R>) -> O {
         match (self.error_handler, self.committed, self.error) {
             (_, _, None) => Ok(handler(self.request).await),
             (Some(response), true, Some(err)) => Ok((response)(self.request, err)),
